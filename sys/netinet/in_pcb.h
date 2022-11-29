@@ -832,6 +832,8 @@ void	in_pcbgroup_update_mbuf(struct inpcb *, struct mbuf *);
 
 void	in_pcbpurgeif0(struct inpcbinfo *, struct ifnet *);
 int	in_pcballoc(struct socket *, struct inpcbinfo *);
+struct inpcb *
+	in_pcballoc_subflow(struct socket *so, struct inpcbinfo *pcbinfo);
 int	in_pcbbind(struct inpcb *, struct sockaddr *, struct ucred *);
 int	in_pcb_lport_dest(struct inpcb *inp, struct sockaddr *lsa,
 	    u_short *lportp, struct sockaddr *fsa, u_short fport,

@@ -113,6 +113,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/fcntl.h>
+#include <sys/kdb.h>
 #include <sys/limits.h>
 #include <sys/lock.h>
 #include <sys/mac.h>
@@ -130,6 +131,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/poll.h>
 #include <sys/proc.h>
 #include <sys/protosw.h>
+#include <sys/queue.h>
 #include <sys/sbuf.h>
 #include <sys/socket.h>
 #include <sys/socketvar.h>
@@ -150,6 +152,11 @@ __FBSDID("$FreeBSD$");
 #include <netinet/tcp.h>
 
 #include <net/vnet.h>
+
+#include <netinet/in.h>
+#include <netinet/in_pcb.h>
+#include <netinet/tcp_var.h>
+#include <netinet/mptcp_var.h>
 
 #include <security/mac/mac_framework.h>
 
@@ -849,6 +856,11 @@ sopeeloff(struct socket *head)
 	return (so);
 }
 #endif	/* SCTP */
+
+struct socket *
+gsoalloc(struct vnet *vnet) {
+	return soalloc(vnet);
+}
 
 int
 sobind(struct socket *so, struct sockaddr *nam, struct thread *td)
@@ -3544,6 +3556,63 @@ sopoll(struct socket *so, int events, struct ucred *active_cred,
 
 int
 sopoll_generic(struct socket *so, int events, struct ucred *active_cred,
+    struct thread *td)
+{
+	int revents;
+
+	SOCK_LOCK(so);
+	if (SOLISTENING(so)) {
+		if (!(events & (POLLIN | POLLRDNORM)))
+			revents = 0;
+		else if (!TAILQ_EMPTY(&so->sol_comp))
+			revents = events & (POLLIN | POLLRDNORM);
+		else if ((events & POLLINIGNEOF) == 0 && so->so_error)
+			revents = (events & (POLLIN | POLLRDNORM)) | POLLHUP;
+		else {
+			selrecord(td, &so->so_rdsel);
+			revents = 0;
+		}
+	} else {
+		revents = 0;
+		SOCKBUF_LOCK(&so->so_snd);
+		SOCKBUF_LOCK(&so->so_rcv);
+		if (events & (POLLIN | POLLRDNORM))
+			if (soreadabledata(so))
+				revents |= events & (POLLIN | POLLRDNORM);
+		if (events & (POLLOUT | POLLWRNORM))
+			if (sowriteable(so))
+				revents |= events & (POLLOUT | POLLWRNORM);
+		if (events & (POLLPRI | POLLRDBAND))
+			if (so->so_oobmark ||
+			    (so->so_rcv.sb_state & SBS_RCVATMARK))
+				revents |= events & (POLLPRI | POLLRDBAND);
+		if ((events & POLLINIGNEOF) == 0) {
+			if (so->so_rcv.sb_state & SBS_CANTRCVMORE) {
+				revents |= events & (POLLIN | POLLRDNORM);
+				if (so->so_snd.sb_state & SBS_CANTSENDMORE)
+					revents |= POLLHUP;
+			}
+		}
+		if (revents == 0) {
+			if (events &
+			    (POLLIN | POLLPRI | POLLRDNORM | POLLRDBAND)) {
+				selrecord(td, &so->so_rdsel);
+				so->so_rcv.sb_flags |= SB_SEL;
+			}
+			if (events & (POLLOUT | POLLWRNORM)) {
+				selrecord(td, &so->so_wrsel);
+				so->so_snd.sb_flags |= SB_SEL;
+			}
+		}
+		SOCKBUF_UNLOCK(&so->so_rcv);
+		SOCKBUF_UNLOCK(&so->so_snd);
+	}
+	SOCK_UNLOCK(so);
+	return (revents);
+}
+
+int
+sopoll_mpstream(struct socket *so, int events, struct ucred *active_cred,
     struct thread *td)
 {
 	int revents;

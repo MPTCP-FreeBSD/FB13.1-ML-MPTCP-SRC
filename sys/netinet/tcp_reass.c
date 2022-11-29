@@ -43,6 +43,7 @@ __FBSDID("$FreeBSD$");
 /* #define TCP_REASS_LOGGING 1 */
 
 #include <sys/param.h>
+#include <sys/kdb.h>
 #include <sys/kernel.h>
 #include <sys/eventhandler.h>
 #include <sys/malloc.h>
@@ -76,6 +77,7 @@ __FBSDID("$FreeBSD$");
 #include <netinet/tcp_seq.h>
 #include <netinet/tcp_timer.h>
 #include <netinet/tcp_var.h>
+#include <netinet/mptcp_var.h>
 #ifdef TCP_REASS_LOGGING
 #include <netinet/tcp_log_buf.h>
 #include <netinet/tcp_hpts.h>
@@ -533,6 +535,7 @@ tcp_reass(struct tcpcb *tp, struct tcphdr *th, tcp_seq *seq_start,
 	struct mbuf *mlast = NULL;
 	struct sockbuf *sb;
 	struct socket *so = tp->t_inpcb->inp_socket;
+	struct mbuf *last_seg;
 	char *s = NULL;
 	int flags, i, lenofoh;
 
@@ -1055,11 +1058,15 @@ new_entry:
 #endif
 present:
 	/*
-	 * Present data to user, advancing rcv_nxt through
+	 * Adjust accounting advancing rcv_nxt through
 	 * completed sequence space.
 	 */
 	if (!TCPS_HAVEESTABLISHED(tp->t_state))
 		return (0);
+
+	KASSERT(tp->t_segq_received == NULL,
+	    ("%s: t_segq_received not NULL\n", __func__));
+		
 	q = TAILQ_FIRST(&tp->t_segq);
 	KASSERT(q == NULL || SEQ_GEQ(q->tqe_start, tp->rcv_nxt),
 		("Reassembly queue for %p has stale entry at head", tp));
@@ -1069,7 +1076,7 @@ present:
 #endif
 		return (0);
 	}
-	SOCKBUF_LOCK(&so->so_rcv);
+	//SOCKBUF_LOCK(&so->so_rcv);
 	do {
 		tp->rcv_nxt += q->tqe_len;
 		flags = q->tqe_flags & TH_FIN;
@@ -1086,7 +1093,17 @@ present:
 				tcp_log_reassm(tp, q, NULL, 0, 0, TCP_R_LOG_READ, 1);
 			}
 #endif
-			sbappendstream_locked(&so->so_rcv, q->tqe_m, 0);
+			//sbappendstream_locked(&so->so_rcv, q->tqe_m, 0);
+			/* Now queue up the segment in the received list. On return
+			 * t_segq_received is assigned to a local-scope pointer and
+			 * set to NULL. The pointer is enqueued in mp_input_segq */
+			if (tp->t_segq_received) {
+				last_seg->m_nextpkt = q->tqe_m;
+				last_seg = q->tqe_m;
+			} else {
+				tp->t_segq_received = q->tqe_m;
+				last_seg = tp->t_segq_received;
+			}
 		}
 #ifdef TCP_REASS_LOGGING
 		if (th != NULL) {
@@ -1121,6 +1138,6 @@ present:
 #ifdef TCP_REASS_LOGGING
 	tcp_reass_log_dump(tp);
 #endif
-	tp->t_flags |= TF_WAKESOR;
+	//tp->t_flags |= TF_WAKESOR;
 	return (flags);
 }

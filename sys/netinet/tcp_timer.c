@@ -50,6 +50,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/socketvar.h>
 #include <sys/sysctl.h>
 #include <sys/systm.h>
+#include <sys/taskqueue.h>
 
 #include <net/if.h>
 #include <net/route.h>
@@ -77,6 +78,8 @@ __FBSDID("$FreeBSD$");
 #include <netinet6/tcp6_var.h>
 #endif
 #include <netinet/tcpip.h>
+#include <netinet/mptcp_var.h>
+#include <netinet/mptcp_pcb.h>
 #ifdef TCPDEBUG
 #include <netinet/tcp_debug.h>
 #endif
@@ -190,6 +193,23 @@ SYSCTL_INT(_net_inet_tcp, OID_AUTO, v6pmtud_blackhole_mss,
     &VNET_NAME(tcp_v6pmtud_blackhole_mss), 0,
     "Path MTU Discovery IPv6 Black Hole Detection lowered MSS");
 #endif
+
+/* MPTCP */
+VNET_DECLARE(int, mpsubflowrexmits);
+#define	V_mpsubflowrexmits  VNET(mpsubflowrexmits)
+VNET_DEFINE(int, mpsubflowrexmits) = 8;
+SYSCTL_INT(_net_inet_tcp, OID_AUTO, mpsubflowrexmits,
+	CTLFLAG_VNET | CTLFLAG_RW, &VNET_NAME(mpsubflowrexmits), 0,
+    "MPTCP - Max number of subflow-level rexmits");
+
+VNET_DECLARE(int, mprexmittrigger);
+#define	V_mprexmittrigger  VNET(mprexmittrigger)
+VNET_DEFINE(int, mprexmittrigger) = 3;
+SYSCTL_INT(_net_inet_tcp, OID_AUTO, mprexmittrigger,
+	CTLFLAG_VNET | CTLFLAG_RW, &VNET_NAME(mprexmittrigger), 0,
+    "MPTCP - RTO count to trigger data-level rexmit");
+
+
 
 #ifdef	RSS
 static int	per_cpu_timers = 1;
@@ -605,8 +625,11 @@ tcp_timer_rexmt(void * xtp)
 {
 	struct tcpcb *tp = xtp;
 	CURVNET_SET(tp->t_vnet);
+	struct mpcb *mp = tp->t_mpcb;
 	int rexmt;
 	struct inpcb *inp;
+	uint64_t mp_rexmit_dsn;
+	int mp_rexmt = 0;
 	struct epoch_tracker et;
 	bool isipv6;
 #ifdef TCPDEBUG
@@ -641,8 +664,21 @@ tcp_timer_rexmt(void * xtp)
 	 * Retransmission timer went off.  Message has not
 	 * been acked within retransmit interval.  Back off
 	 * to a longer retransmit interval and retransmit one segment.
-	 */
-	if (++tp->t_rxtshift > TCP_MAXRXTSHIFT) {
+	 *
+	 * XXXNJW: added a (temporary) way to kill a retansmitting TCP
+	 * if we are using multipath. Should really be checking subflow
+	 * count however, as this will disconnect a single-subflow MPTCP
+	 * connection after rxtshift hits mpsubflowrexmits
+ 	 */
+	if (++tp->t_rxtshift > TCP_MAXRXTSHIFT ||
+	       ((tp->t_sf_state & SFS_MP_ENABLED) &&
+	       (tp->t_rxtshift == V_mpsubflowrexmits))) {
+
+		if (tp->t_sf_state & SFS_MP_ENABLED)
+			tp->t_sf_state |= SFS_MP_DISCONNECTED;
+
+		printf("%s: drop tp %p, sf state %d\n", __func__, tp, tp->t_sf_state);
+
 		tp->t_rxtshift = TCP_MAXRXTSHIFT;
 		TCPSTAT_INC(tcps_timeoutdrop);
 		if (inp->inp_flags & (INP_TIMEWAIT | INP_DROPPED)) {
@@ -857,6 +893,23 @@ tcp_timer_rexmt(void * xtp)
 #endif
 			in_losing(tp->t_inpcb);
 	}
+
+	/*
+	 * After V_mprexmittrigger RTOs firing, re-inject the outstanding data.
+	 *
+	 * triggered only once. all un-acked segments are enqueued at this time.
+	 */
+	if (tp->t_state == TCPS_ESTABLISHED && (tp->t_sf_state & SFS_MP_ENABLED)
+		&& tp->t_rxtshift == V_mprexmittrigger) {
+		int map_offset;
+		struct ds_map *snd_dsmap = mp_find_dsmap(tp, tp->snd_nxt);
+		if (snd_dsmap != NULL) {
+			mp_rexmt = 1;
+   			map_offset = tp->snd_nxt - snd_dsmap->sf_seq_start;
+            mp_rexmit_dsn = snd_dsmap->ds_map_start + map_offset;
+		}
+	}
+
 	tp->snd_nxt = tp->snd_una;
 	tp->snd_recover = tp->snd_max;
 	/*
@@ -879,6 +932,24 @@ tcp_timer_rexmt(void * xtp)
 #endif
 	TCP_PROBE2(debug__user, tp, PRU_SLOWTIMO);
 	INP_WUNLOCK(inp);
+
+	/* Subflow has triggered multiple RTOs. Take the data-level
+	 * offset and resend via mp_output. mp_rexmt is only set when
+	 * we have a valid tp */
+	if (tp != NULL && mp_rexmt) {
+        MPP_LOCK(mp->mp_mppcb);
+        /* XXXNJW: To simplify for now, though this does work.
+         * If mp_state > ESTABLISHED, let the MP RTO take care of
+         * re-sending DFINs */
+        if (mp->mp_state == MPS_M_ESTABLISHED) {
+			mp->ds_snd_nxt = lmax(mp_rexmit_dsn, mp->ds_snd_una);
+			printf("%s: data-level re-inject at %u\n", __func__,
+				(uint32_t) mp->ds_snd_nxt);
+        }
+		(void) mp_output(mp);
+		MPP_UNLOCK(mp->mp_mppcb);
+	}
+
 out:
 	CURVNET_RESTORE();
 }

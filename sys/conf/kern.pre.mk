@@ -59,7 +59,7 @@ _COPTFLAGS_EXTRA=-frename-registers
 .else
 _COPTFLAGS_EXTRA=
 .endif
-COPTFLAGS?=-O2 -pipe ${_COPTFLAGS_EXTRA}
+COPTFLAGS?=-O0 -pipe ${_COPTFLAGS_EXTRA}
 .if !empty(COPTFLAGS:M-O[23s]) && empty(COPTFLAGS:M-fno-strict-aliasing)
 COPTFLAGS+= -fno-strict-aliasing
 .endif

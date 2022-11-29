@@ -40,6 +40,8 @@ __FBSDID("$FreeBSD$");
 #include "opt_kern_tls.h"
 #include "opt_tcpdebug.h"
 
+#include <sys/endian.h>
+
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/arb.h>
@@ -47,6 +49,7 @@ __FBSDID("$FreeBSD$");
 #ifdef TCP_HHOOK
 #include <sys/hhook.h>
 #endif
+#include <sys/kdb.h>
 #include <sys/kernel.h>
 #ifdef KERN_TLS
 #include <sys/ktls.h>
@@ -61,6 +64,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/socketvar.h>
 #include <sys/sysctl.h>
 #include <sys/stats.h>
+#include <sys/taskqueue.h>
 
 #include <net/if.h>
 #include <net/route.h>
@@ -99,6 +103,10 @@ __FBSDID("$FreeBSD$");
 #include <netinet/tcp_offload.h>
 #endif
 
+#include <netinet/mptcp.h>
+#include <netinet/mptcp_pcb.h>
+#include <netinet/mptcp_var.h>
+
 #include <netipsec/ipsec_support.h>
 
 #include <netinet/udp.h>
@@ -112,7 +120,7 @@ SYSCTL_INT(_net_inet_tcp, OID_AUTO, path_mtu_discovery, CTLFLAG_VNET | CTLFLAG_R
 	&VNET_NAME(path_mtu_discovery), 1,
 	"Enable Path MTU Discovery");
 
-VNET_DEFINE(int, tcp_do_tso) = 1;
+VNET_DEFINE(int, tcp_do_tso) = 0;
 SYSCTL_INT(_net_inet_tcp, OID_AUTO, tso, CTLFLAG_VNET | CTLFLAG_RW,
 	&VNET_NAME(tcp_do_tso), 0,
 	"Enable TCP Segmentation Offload");
@@ -155,6 +163,9 @@ SYSCTL_INT(_net_inet_tcp, OID_AUTO, sendbuf_auto_lowat, CTLFLAG_VNET | CTLFLAG_R
 
 static void inline	cc_after_idle(struct tcpcb *tp);
 
+static void inline 	mp_addoptions(struct tcpopt *to,
+				u_int *optlen_ptr, u_char *optp);
+
 #ifdef TCP_HHOOK
 /*
  * Wrapper for the TCP established output helper hook.
@@ -190,6 +201,369 @@ cc_after_idle(struct tcpcb *tp)
 		CC_ALGO(tp)->after_idle(tp->ccv);
 }
 
+static void inline
+mp_addoptions(struct tcpopt *to, u_int *optlen_ptr, u_char *optp) {
+	struct mp_capable mcap;
+
+	uint64_t mask = 0;
+	for (mask = 1; mask < MPOF_MAXOPT; mask <<= 1) {
+		if ((to->to_mopts.mpo_flags & mask) != mask)
+			continue;
+		if (*optlen_ptr == TCP_MAXOLEN)
+			break;
+		switch (to->to_mopts.mpo_flags & mask)
+		{
+		case MPOF_CAPABLE_SYN:
+		{
+			/*
+			 * Note that keys are stored in network order, so
+			 * do no need to call htobe64 before bcopy
+			 */
+			mcap.kind = TCPOPT_MPTCP;
+			mcap.ver_sub = MPTCP_SUBTYPE_MP_CAPABLE;
+
+			uint8_t cap_flags = 0;
+			cap_flags |= USE_SHA1; // hard coded in sha1
+			cap_flags &= ~USE_CSUM; // don't support csumming yet
+
+			if (to->to_mopts.mpo_flags & MPOF_USE_CSUM) {
+				cap_flags |= USE_CSUM;
+			}
+			/* sending a SYN */
+
+			if (TCP_MAXOLEN - *optlen_ptr < MPTCP_SUBLEN_MP_CAPABLE_SYN)
+				break;
+
+			mcap.length = MPTCP_SUBLEN_MP_CAPABLE_SYN;
+
+			/* SYN (or SYNACK), just include the local key */
+			u_int64_t key = to->to_mopts.local_key;
+
+			/* MP_CAPABLE type/flags */
+			*optlen_ptr += MPTCP_SUBLEN_MP_CAPABLE_SYN;
+			*optp++ = mcap.kind;
+			*optp++ = mcap.length;
+			*optp++ = 0; // version and subtype are 0
+			*optp++ = cap_flags;
+
+			/* copy in the key s*/
+			bcopy((u_char *)&key, optp, sizeof(key));
+			optp += sizeof(key);
+
+			/*
+			 * Indicate to caller that the capable option has been
+			 * copied into the outgoing TCP header.
+			 */
+			to->to_mopts.mpo_flags &= ~MPOF_CAPABLE_SYN;
+			break;
+		}
+		case MPOF_CAPABLE_ACK:
+		{
+			uint8_t cap_flags = 0;
+			/* ACK of 3-way handshake */
+			if (TCP_MAXOLEN - *optlen_ptr < MPTCP_SUBLEN_MP_CAPABLE_ACK)
+				break;
+
+			u_int64_t local_key = to->to_mopts.local_key;
+			u_int64_t remote_key = to->to_mopts.remote_key;
+
+			*optlen_ptr += MPTCP_SUBLEN_MP_CAPABLE_ACK;
+			*optp++ = TCPOPT_MPTCP;
+			*optp++ = MPTCP_SUBLEN_MP_CAPABLE_ACK;
+			*optp++ = 0;	// just manually setting
+			*optp++ = cap_flags;
+
+			/* and copy in the local key */
+			bcopy((u_char *)&local_key, optp, sizeof(local_key));
+			optp += sizeof(local_key);
+
+			/* echo the remote key */
+			bcopy((u_char *)&remote_key, optp, sizeof(remote_key));
+			optp += sizeof(remote_key);
+
+			break;
+		}
+		case MPOF_MP_JOIN: /* Sending a MP_JOIN SYN Option */
+		{
+			if (TCP_MAXOLEN - *optlen_ptr < MPTCP_SUBLEN_MP_JOIN_SYN)
+				break;
+
+			uint8_t subtype = MPTCP_SUBTYPE_MP_JOIN;
+
+			/*
+			 * XXXNJW: just assuming for now that SYNs are sent as subflows
+			 * are added
+			 */
+			uint8_t addrID = to->to_mopts.addr_id;
+			uint32_t remote_token = htonl(to->to_mopts.rcv_token);
+
+			subtype = (subtype << 4);
+
+			*optp++ = TCPOPT_MPTCP;
+			*optp++ = MPTCP_SUBLEN_MP_JOIN_SYN;
+			*optp++ = (MPTCP_SUBTYPE_MP_JOIN << 4);	// XXXNJW manually setting
+
+			*optlen_ptr += MPTCP_SUBLEN_MP_JOIN_SYN;
+			*optp++ = addrID;
+
+			printf("%s: copied rcv's token %u\n", __func__,                     //XXXNJW
+			    to->to_mopts.rcv_token);
+			printf("%s: rcv token htonl %u\n", __func__,
+					htonl(to->to_mopts.rcv_token));
+
+			bcopy((u_char *)&remote_token,
+					optp, sizeof(remote_token));
+			optp += sizeof(remote_token);
+
+			bcopy((u_char *)&to->to_mopts.snd_rnd,
+					optp, sizeof(to->to_mopts.snd_rnd));
+			optp += sizeof(to->to_mopts.snd_rnd);
+			break;
+		}
+		case MPOF_JOIN_SYN: /* Sending a MP_JOIN SYNACK Option */
+		{
+			if (TCP_MAXOLEN - *optlen_ptr < MPTCP_SUBLEN_MP_JOIN_SYNACK)
+				break;
+
+			uint8_t subtype = MPTCP_SUBTYPE_MP_JOIN;
+			subtype = (subtype << 4);
+
+			*optlen_ptr += MPTCP_SUBLEN_MP_JOIN_SYNACK;
+			*optp++ = TCPOPT_MPTCP;
+			*optp++ = MPTCP_SUBLEN_MP_JOIN_SYNACK;
+			*optp++ = subtype;
+			*optp++ = (uint8_t) to->to_mopts.addr_id;
+
+			bcopy((u_char *)&to->to_mopts.truncated_MAC,
+			    optp, sizeof(to->to_mopts.truncated_MAC));
+			optp += sizeof(to->to_mopts.truncated_MAC);
+
+			bcopy((u_char *)&to->to_mopts.snd_rnd,
+			    optp, sizeof(to->to_mopts.snd_rnd));
+			optp += sizeof(to->to_mopts.snd_rnd);
+			break;
+		}
+		case MPOF_JOIN_SYNACK: /* Sending a MP_JOIN ACK Option */
+		{
+			if (TCP_MAXOLEN - *optlen_ptr < MPTCP_SUBLEN_MP_JOIN_ACK) {
+				break;
+			}
+
+			uint8_t subtype = MPTCP_SUBTYPE_MP_JOIN;
+			subtype = (subtype << 4);
+
+			*optlen_ptr += (uint8_t) MPTCP_SUBLEN_MP_JOIN_ACK;
+			*optp++ = TCPOPT_MPTCP;
+			*optp++ = MPTCP_SUBLEN_MP_JOIN_ACK;
+			*optp++ = subtype;
+			/* the last 12-bits after subtype are reserved (zeroed) */
+			*optp++ = 0;
+
+			/* Copy full HMAC-A into option */
+			bcopy(to->to_mopts.snd_mac, optp, 20);
+			optp += 20;
+			break;
+		}
+		case MPOF_DSS:
+		{
+			uint8_t subtype = MPTCP_SUBTYPE_DSS;
+			uint8_t dss_opts = 0;
+			uint8_t length = 4; /* the initial 4 bytes of option */
+
+			/* Set flags for DSS */
+			if (to->to_mopts.mpo_flags & MPOF_DATA_FIN) {
+				printf("%s: setting Data-fin\n", __func__);
+				dss_opts |= FIN_PRESENT;
+			}
+
+			if (to->to_mopts.mpo_flags & MPOF_DATA_ACK) {
+				dss_opts |= ACK_PRESENT;
+				length += 4;
+
+				if (to->to_mopts.mpo_flags & MPOF_ACK64) {
+					dss_opts |= ACK_64_PRESENT;
+					length += 4;
+				}
+			}
+
+			if (to->to_mopts.mpo_flags & MPOF_DSN_MAP) {
+				dss_opts |= MAP_PRESENT;
+				length += 4;
+
+				length += 4;	/* subflow sequence num */
+				length += 2;	/* data length */
+
+				if(to->to_mopts.mpo_flags & MPOF_USE_CSUM)
+					length += 2;
+
+				if (to->to_mopts.mpo_flags & MPOF_DSN64) {
+					length += 4;
+					dss_opts |= DSN_64;
+				}
+			}
+
+			if (TCP_MAXOLEN - *optlen_ptr < length)
+				break;
+
+			*optlen_ptr += length;
+
+			// pad it out to divide by 4 to prevent EOL being inserted
+			// before our option
+			// XXXNJW kind of a hack, to fix
+			if (*optlen_ptr % 4) {
+				*optlen_ptr += TCPOLEN_NOP;
+				*optp++ = TCPOPT_NOP;
+				*optlen_ptr += TCPOLEN_NOP;
+				*optp++ = TCPOPT_NOP;
+			}
+
+			/* option kind and length fields */
+			*optp++ = TCPOPT_MPTCP;
+			*optp++ = length;
+
+			/* subtype and flags */
+			subtype = (subtype << 4);
+			bcopy((u_char *)&subtype, optp, sizeof(uint8_t));
+			optp += sizeof(uint8_t);
+//			to->to_mopts.dss_opts_f_p = (uint8_t*) optp;
+			bcopy((u_char *)&dss_opts, optp, sizeof(uint8_t));
+			optp += sizeof(uint8_t);
+
+			/* copy the Data ACK */
+			if (to->to_mopts.mpo_flags & MPOF_DATA_ACK) {
+				if (to->to_mopts.mpo_flags & MPOF_ACK64) {
+					u_int64_t data_ack_num = to->to_mopts.data_ack_num;
+					data_ack_num = htobe64(data_ack_num);
+					bcopy((u_char *)&data_ack_num, optp, sizeof(data_ack_num));
+					optp += sizeof(data_ack_num);
+				} else {
+					u_int32_t data_ack_num =
+					    (uint32_t) to->to_mopts.data_ack_num;
+					data_ack_num = htonl(data_ack_num);
+					bcopy((u_char *)&data_ack_num, optp, sizeof(data_ack_num));
+					optp += sizeof(data_ack_num);
+				}
+			}
+
+			/* DSN contents */
+			if (to->to_mopts.mpo_flags & MPOF_DSN_MAP) {
+				uint32_t data_seq_num = (uint32_t) to->to_mopts.data_seq_num;
+				/* DSN and SSN */
+				if (to->to_mopts.mpo_flags & MPOF_DSN64) {
+					to->to_mopts.data_seq_num =
+							htobe64(to->to_mopts.data_seq_num);
+					bcopy((u_char *)&to->to_mopts.data_seq_num,
+							optp, sizeof(to->to_mopts.data_seq_num));
+					optp += sizeof(to->to_mopts.data_seq_num);
+				} else {
+					data_seq_num = htonl(data_seq_num);
+					bcopy((u_char *)&data_seq_num, optp, sizeof(data_seq_num));
+					optp += sizeof(data_seq_num);
+				}
+
+				to->to_mopts.sub_seq_num = htonl(to->to_mopts.sub_seq_num);
+				bcopy((u_char *)&to->to_mopts.sub_seq_num, optp,
+					sizeof(to->to_mopts.sub_seq_num));
+				optp += sizeof(to->to_mopts.sub_seq_num);
+
+				/* Length */
+				/* set length after we know the size, for a map-per-packet
+				 * scenario */
+				to->to_mopts.dss_data_len_p = optp;
+//				to->to_mopts.dss_data_len = htons(to->to_mopts.dss_data_len);
+//				bcopy((u_char *)&to->to_mopts.dss_data_len, optp,
+//					sizeof(to->to_mopts.dss_data_len));
+				optp += sizeof(to->to_mopts.dss_data_len);
+
+				if(to->to_mopts.mpo_flags & MPOF_USE_CSUM) {
+					to->to_mopts.dss_csum = htons(to->to_mopts.dss_csum);
+					bcopy((u_char *)&to->to_mopts.dss_csum, optp,
+						sizeof(to->to_mopts.dss_csum));
+					optp += sizeof(to->to_mopts.dss_csum);
+				}
+			}
+
+			/*
+			 * We process all at once so can clear flags to prevent
+			 * processing twice.
+			 */
+			to->to_mopts.mpo_flags &= ~MPOF_DSN_MAP;
+			to->to_mopts.mpo_flags &= ~MPOF_DATA_ACK;
+			to->to_mopts.mpo_flags &= ~MPOF_DATA_FIN;
+			break;
+		}
+		case MPOF_ADD_ADDR:
+		{
+			struct mp_add address;
+			int i, addr_id, addr_len = 0;
+			void * addr = NULL;
+
+			address.length = address.sub_ipver = 0;
+
+			/* Loop through the available addresses. */
+			for (i = 0; i < to->to_mopts.address_count; i++) {
+				/* continue if there are addresses to advertise */
+				if (!(to->to_mopts.add_addr_mask & (1 << i)))
+					continue;
+
+				switch (mp_usable_addresses[i].ss_family) {
+					case AF_INET:
+						addr = &((struct sockaddr_in *)
+							&mp_usable_addresses[i])->sin_addr.s_addr;
+						address.length = MPTCP_SUBLEN_ADD_ADDRV4;
+						address.sub_ipver = 4;
+						addr_len = 4;
+						break;
+					case AF_INET6:
+						addr = &((struct sockaddr_in6 *)
+							&mp_usable_addresses[i])->sin6_addr.__u6_addr;
+						address.length = MPTCP_SUBLEN_ADD_ADDRV6;
+						address.sub_ipver = 6;
+						addr_len = 16;
+						break;
+				}
+
+				if (TCP_MAXOLEN - *optlen_ptr < address.length)
+					break;
+
+				/* mark address as advertised. Need to pass this back to the
+				 * mpcb */
+				to->to_mopts.add_addr_mask &= ~(1 << i);
+
+				*optlen_ptr += address.length;
+				*optp++ = TCPOPT_MPTCP;
+				*optp++ = address.length;
+
+				/* subtype and IPVer */
+				uint8_t subtype = (MPTCP_SUBTYPE_ADD_ADDR << 4);
+				subtype |= address.sub_ipver;
+				bcopy((u_char *)&subtype, optp, sizeof(uint8_t));
+				optp ++;
+
+				/* Minus 1 as we never send add_addr for the master subflow */
+				addr_id = i - 1;
+
+				/* Address ID */
+				bcopy((u_char *)&addr_id, optp, sizeof(uint8_t));
+				optp ++;
+
+				bcopy((u_char *)addr, optp, addr_len);
+				optp += addr_len;
+			}
+			break;
+		}
+		case MPOF_REMOVE_ADDR:
+			break;
+		case MPOF_MP_FAIL:
+			break;
+		case MPOF_FASTCLOSE:
+			break;
+		default:
+			break;
+		}
+	}
+}
+
 /*
  * Tcp output routine: figure out what should be sent and send it.
  */
@@ -197,9 +571,11 @@ int
 tcp_output(struct tcpcb *tp)
 {
 	struct socket *so = tp->t_inpcb->inp_socket;
+	struct mpcb *mp = tp->t_mpcb;
 	int32_t len;
 	uint32_t recwin, sendwin;
-	int off, flags, error = 0;	/* Keep compiler happy */
+	int off = 0, flags, map_offset = 0, error = 0;	/* Keep compiler happy */
+	struct ds_map *snd_dsmap;
 	u_int if_hw_tsomaxsegcount = 0;
 	u_int if_hw_tsomaxsegsize = 0;
 	struct mbuf *m;
@@ -238,6 +614,7 @@ tcp_output(struct tcpcb *tp)
 
 	NET_EPOCH_ASSERT();
 	INP_WLOCK_ASSERT(tp->t_inpcb);
+	KASSERT(mp != NULL, ("%s: mp NULL", __func__));
 
 #ifdef TCP_OFFLOAD
 	if (tp->t_flags & TF_TOE)
@@ -579,6 +956,12 @@ after_sack_rexmit:
 	recwin = lmin(lmax(sbspace(&so->so_rcv), 0),
 	    (long)TCP_MAXWIN << tp->rcv_scale);
 
+//	if (recwin > (long)TCP_MAXWIN) {
+//		printf("%s: recwin = sbspace = %ld scale %d \n", __func__, recwin,
+//		tp->rcv_scale);
+////		kdb_break();
+//	}
+
 	/*
 	 * Sender silly window avoidance.   We transmit under the following
 	 * conditions when len is non-zero:
@@ -800,6 +1183,7 @@ send:
 	 * syncache.
 	 */
 	to.to_flags = 0;
+	to.to_mopts.mpo_flags = 0;
 	if ((tp->t_flags & TF_NOOPT) == 0) {
 		/* Maximum segment size. */
 		if (flags & TH_SYN) {
@@ -846,6 +1230,192 @@ send:
 			to.to_wscale = tp->request_r_scale;
 			to.to_flags |= TOF_SCALE;
 		}
+        /* MPTCP options */
+		if (V_tcp_do_mptcp) {
+			if (flags & TH_SYN) {
+				/* Multipath announce capable, for SYN and SYN/ACK */
+				if (tp->t_sf_flags & SFF_SEND_MPCAPABLE) {
+					tp->t_sf_flags &= ~SFF_SEND_MPCAPABLE;
+					tp->t_sf_flags |= SFF_SENT_MPCAPABLE;
+					to.to_flags |= TOF_MPTCP;
+					to.to_mopts.mpo_flags |= MPOF_CAPABLE_SYN;
+					mp_process_local_key(&tp->t_mp_conn,
+					    mp_generate_local_key());
+					to.to_mopts.local_key = tp->t_mp_conn.local_key;
+				} else {
+					/* A SYN on a subflow that isn't the first, use
+					 * MP_JOIN. In this case an MP session has already
+					 * been established. */
+					tp->t_sf_state |= SFS_MP_CONNECTING;
+					to.to_flags |= TOF_MPTCP;
+					to.to_mopts.mpo_flags |= MPOF_MP_JOIN;
+					to.to_mopts.rcv_token =
+							tp->t_mp_conn.remote_token;
+					tp->t_mp_conn.local_rand = to.to_mopts.snd_rnd =
+					    arc4random();
+					to.to_mopts.addr_id = tp->t_addrid - 1;
+				}
+			}
+
+			/* received a SYNACK with MP_CAPABLE */
+			if (tp->t_sf_flags & SFF_GOT_SYNACK) {
+				tp->t_sf_flags &= ~SFF_GOT_SYNACK;
+				/* got a synack after sending capable */
+
+				if (tp->t_sf_flags & SFF_SENT_MPCAPABLE) {
+					to.to_flags |= TOF_MPTCP;
+					to.to_mopts.mpo_flags |= MPOF_CAPABLE_ACK;
+					to.to_mopts.local_key = tp->t_mp_conn.local_key;
+					to.to_mopts.remote_key = tp->t_mp_conn.remote_key;
+				}
+			}
+
+			/* Received a SYNACK with MP_JOIN */
+			if (tp->t_sf_flags & SFF_GOT_JOIN_SYNACK) {
+				/* XXXNJW: should clear this only when we know that the
+				 * option has been copied into a packet.
+				 */
+				tp->t_sf_flags &= ~SFF_GOT_JOIN_SYNACK;
+
+				/* XXXNJW: Should set this state only when we know the
+				 * option has been put into packet */
+				tp->t_sf_state |= SFS_MP_CONNECTING;
+
+				/* Must send full HMAC-A as third part of MP_JOIN
+				 * handshake */
+				to.to_mopts.snd_mac = tp->t_mp_conn.hmac_local;
+
+				/* Add an MP_JOIN_ACK to the outgoing packet */
+				to.to_flags |= TOF_MPTCP;
+				to.to_mopts.mpo_flags |= MPOF_JOIN_SYNACK;
+			}
+
+		} else {
+			/* Need to init these even if not doing multipath, as the
+			 * accounting requires it. */
+//			MP_INNER_LOCK(tp->t_mpcb);
+//			mp_sendseqinit(tp->t_mpcb, tp);
+//			MP_INNER_UNLOCK(tp->t_mpcb);
+		}
+
+		/* Do these options only once mptcp is established. */
+		if (tp->t_sf_state & SFS_MP_ENABLED) {
+			/* XXXNJW:
+			 * A weird thing about this is that we only trigger
+			 * the advertisement of addresses in mp_do_output,
+			 * which is called under the MPP_LOCK. Hence for now
+			 * just pulling the address info directly out of the
+			 * mpcb. We should only ever enter into here while
+			 * under an MPP lock.
+			 *
+			 * Should replace this
+			 */
+			if (tp->t_sf_flags & SFF_SEND_ADD_ADDR) {
+				MPP_LOCK_ASSERT(tp->t_mpcb->mp_mppcb);
+				tp->t_sf_flags &= ~SFF_SEND_ADD_ADDR;
+				to.to_flags |= TOF_MPTCP;
+				to.to_mopts.mpo_flags |= MPOF_ADD_ADDR;
+				to.to_mopts.add_addr_mask = tp->t_mpcb->mp_advaddr_mask;
+				to.to_mopts.address_count = tp->t_mpcb->mp_conn_address_count;
+				to.to_mopts.addr_id = tp->t_mpcb->subflow_cnt - 1;
+			}
+
+			/*
+			 * Need to attach a DATA-ACK to the outgoing packet
+			 * MPO_DATA_ACK is usually set in tcp_reass when in-order
+			 * data segments are provided to the process. currently
+			 * this works like an ACK_NOW, and will be put onto any
+			 * outgoing segment.
+			 *
+			 * XXX: provide a callout to do time-delayed Data-ACKs
+			 */
+			if (tp->t_sf_flags & SFF_NEED_DACK) {
+				tp->t_sf_flags &= ~SFF_NEED_DACK;
+				to.to_flags |= TOF_MPTCP;
+				to.to_mopts.mpo_flags |= (MPOF_DATA_ACK | MPOF_DSS);
+				// should check against session settings
+				//to.to_mopts.mpo_flags |= MPOF_DSS;
+				//to.to_mopts.mpo_flags |= MPOF_ACK64;
+				to.to_mopts.data_ack_num =
+				    (uint32_t) tp->t_mp_conn.ds_ack_num;
+//				DACK value to be set in tcpcb by mp_output.
+			}
+
+			/* Connection is closing */
+			if (tp->t_sf_flags & SFF_NEED_DFIN) {
+				to.to_flags |= TOF_MPTCP;
+				to.to_mopts.mpo_flags |= (MPOF_DATA_FIN | MPOF_DSS);
+
+				/* A DFIN with no payload requires:
+				 * - SSN == 0
+				 * - Data-len == 1
+				 * - DSN == The next DSN to send
+				 */
+				if (len == 0) {
+					to.to_mopts.mpo_flags |= MPOF_DSN_MAP;
+					to.to_mopts.mpo_flags |= MPOF_DSS;
+				    to.to_mopts.sub_seq_num = 0;
+				    to.to_mopts.dss_data_len = 1;
+
+				    /* mp_do_output pushes ds_snd_nxt by one when dfin
+				     * is set. There is no map with a zero-len segment
+				     * (typically dsn is based on map offset) so must
+				     * subtract '1' here to make sure we send the next
+				     * expected data-level byte.
+				     * XXXNJW: to fix */
+					to.to_mopts.data_seq_num =
+					    (uint32_t) tp->t_mp_conn.ds_snd_nxt - 1;
+
+					// change to use ds_snd_nxt specified by mp-layer
+					// (in e.g. tp->t_ds_snd_nxt)
+
+					snd_dsmap = NULL;
+				}
+			}
+
+			/* Find the ds map for this tcp sqn */
+		    snd_dsmap = (len) ? mp_find_dsmap(tp, tp->snd_nxt): NULL;
+
+			if (len)
+			    KASSERT(snd_dsmap != NULL,
+			        ("%s: mp enabled, have len but no map\n", __func__));
+
+			if (snd_dsmap != NULL) {
+     			map_offset = tp->snd_nxt - snd_dsmap->sf_seq_start;
+
+				/* Currently puts a DSN map on each packet. */
+				to.to_mopts.mpo_flags |= MPOF_DSN_MAP;
+
+				/* XXXNJW: Need to put in options for either mult-packet maps or
+				 * per-packet maps.
+				 *
+				 * Need to build a DSS MAP for the outgoing packet. Note that the
+				 * mapping here does not always map directly to the ds_map. In the
+				 * following case we are creating smaller maps for each segment
+				 * from the ds_map */
+				if (to.to_mopts.mpo_flags & MPOF_DSN_MAP) {
+					/* XXXNJW: implement checks for csum and dsn64 */
+					//to.to_mopts.mpo_flags |= MPOF_USE_CSUM;
+					//to.to_mopts.mpo_flags |= MPOF_DSN64;
+
+					to.to_flags |= TOF_MPTCP;
+					to.to_mopts.mpo_flags |= MPOF_DSS;
+
+					/* This will create a map for each segment, of length 'len' */
+					to.to_mopts.sub_seq_num =
+						(snd_dsmap->sf_seq_start + map_offset - tp->iss);
+					to.to_mopts.data_seq_num =
+						(uint32_t) snd_dsmap->ds_map_start + map_offset;
+					//to.to_mopts.dss_data_len = len;
+					if (to.to_mopts.data_seq_num == 0) {
+						printf("%s: dsn is 0 len %ld tsqn %u\n", __func__,
+						    len, tp->snd_nxt);
+					}
+
+				}
+			}
+		}
+
 		/* Timestamps. */
 		if ((tp->t_flags & TF_RCVD_TSTMP) ||
 		    ((flags & TH_SYN) && (tp->t_flags & TF_REQ_TSTMP))) {
@@ -883,6 +1453,10 @@ send:
 			to.to_flags |= TOF_SIGNATURE;
 #endif /* TCP_SIGNATURE */
 
+		/* Clear MPTCP options from RST packets */
+		if (flags & TH_RST)
+		    to.to_flags &= ~TOF_MPTCP;
+
 		/* Processing the options. */
 		hdrlen += optlen = tcp_addoptions(&to, opt);
 		/*
@@ -893,6 +1467,15 @@ send:
 		    !(to.to_flags & TOF_FASTOPEN))
 			len = 0;
 	}
+
+	/* XXXNJW to remove */
+	/* update the address masks */
+	if (to.to_mopts.mpo_flags & MPOF_ADD_ADDR) {
+	    to.to_mopts.mpo_flags &= ~MPOF_ADD_ADDR;
+	    MPP_LOCK_ASSERT(tp->t_mpcb->mp_mppcb);
+	    tp->t_mpcb->mp_advaddr_mask = to.to_mopts.add_addr_mask;
+	}
+
 	if (tp->t_port) {
 		if (V_tcp_udp_tunneling_port == 0) {
 			/* The port was removed?? */
@@ -1003,6 +1586,55 @@ send:
 
 	KASSERT(len + hdrlen + ipoptlen <= IP_MAXPACKET,
 	    ("%s: len > IP_MAXPACKET", __func__));
+
+	/* XXXNJW: This is a temporary hack way to adjust ds map length
+	 * after the options have been added. This is only applicable for
+	 * map-per-packet cases, where the length of the map is the length
+	 * of the transmitted segment.
+	 *
+	 * Should probably just have longer maps and include the same
+	 * map details multiple times until we've sent all the data covered
+	 * by that map?
+	 *
+	 * also need a better solution to segments overlapping map boundaries
+	 * than clamping down to map_remain
+	 */
+//	if (len && (tp->t_sf_state & SFS_MP_ENABLED)) {
+//	    long unsent = snd_dsmap->ds_map_len - map_offset;
+//	    len = min((uint32_t)len, unsent);
+//	    to.to_mopts.dss_data_len = htons((uint16_t)len);
+//	}
+//
+//	/* Now copy the length into the length field od the DSS option */
+//	if ((tp->t_sf_state & SFS_MP_ENABLED) &&
+//	    (to.to_mopts.mpo_flags & MPOF_DSS)) {
+//		if(to.to_mopts.dss_data_len)
+//			bcopy((u_char *)&to.to_mopts.dss_data_len,
+//				to.to_mopts.dss_data_len_p, sizeof(to.to_mopts.dss_data_len));
+//	}
+
+	if ((tp->t_sf_state & SFS_MP_ENABLED) && (to.to_flags & TOF_MPTCP)) {
+		long unsent = 0;
+		if (len) {
+	        unsent = snd_dsmap->ds_map_len - map_offset;
+			if(unsent == 0) {
+				printf("%s: len %ld unsent %ld, ds_map_len %d\n",
+				    __func__, len, unsent, (uint32_t) snd_dsmap->ds_map_len);
+				kdb_break();
+			}
+	        len = min((uint32_t)len, unsent);
+	        to.to_mopts.dss_data_len = htons((uint16_t)len);
+	        bcopy((u_char *)&to.to_mopts.dss_data_len,
+				to.to_mopts.dss_data_len_p, sizeof(to.to_mopts.dss_data_len));
+		} else if (tp->t_sf_flags & SFF_NEED_DFIN) {
+		    to.to_mopts.dss_data_len =
+		        htons((uint16_t)to.to_mopts.dss_data_len);
+		    bcopy((u_char *)&to.to_mopts.dss_data_len,
+				to.to_mopts.dss_data_len_p, sizeof(to.to_mopts.dss_data_len));
+		}
+		tp->t_sf_flags &= ~SFF_NEED_DFIN; /* XXXNJW: a workaround */
+	}
+
 
 /*#ifdef DIAGNOSTIC*/
 #ifdef INET6
@@ -1880,6 +2512,15 @@ tcp_addoptions(struct tcpopt *to, u_char *optp)
 			to->to_signature = optp;
 			while (siglen--)
 				 *optp++ = 0;
+			break;
+			}
+		case TOF_MPTCP:
+			{
+			while (optlen % 2) {
+				optlen += TCPOLEN_NOP;
+				*optp++ = TCPOPT_NOP;
+			}
+			mp_addoptions(to, &optlen, optp);
 			break;
 			}
 		case TOF_SACK:

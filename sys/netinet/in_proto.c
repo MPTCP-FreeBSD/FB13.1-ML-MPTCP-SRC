@@ -81,6 +81,7 @@ __FBSDID("$FreeBSD$");
 #include <netinet/udp.h>
 #include <netinet/udp_var.h>
 #include <netinet/ip_encap.h>
+#include <netinet/mptcp_var.h>
 
 /*
  * TCP/IP protocol family: IP, ICMP, UDP, TCP.
@@ -135,11 +136,11 @@ struct protosw inetsw[] = {
 	.pr_flags =		PR_CONNREQUIRED|PR_IMPLOPCL|PR_WANTRCVD,
 	.pr_input =		tcp_input,
 	.pr_ctlinput =		tcp_ctlinput,
-	.pr_ctloutput =		tcp_ctloutput,
+	.pr_ctloutput =		mp_ctloutput,
 	.pr_init =		tcp_init,
 	.pr_slowtimo =		tcp_slowtimo,
 	.pr_drain =		tcp_drain,
-	.pr_usrreqs =		&tcp_usrreqs
+	.pr_usrreqs =		&mptcp_usrreqs
 },
 #ifdef SCTP
 {

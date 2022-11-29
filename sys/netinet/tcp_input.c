@@ -57,16 +57,19 @@ __FBSDID("$FreeBSD$");
 #include "opt_ipsec.h"
 #include "opt_tcpdebug.h"
 
+#include <sys/endian.h>
 #include <sys/param.h>
 #include <sys/arb.h>
 #include <sys/kernel.h>
 #ifdef TCP_HHOOK
 #include <sys/hhook.h>
 #endif
+#include <sys/limits.h>
 #include <sys/malloc.h>
 #include <sys/mbuf.h>
 #include <sys/proc.h>		/* for proc0 declaration */
 #include <sys/protosw.h>
+#include <sys/sbuf.h>
 #include <sys/qmath.h>
 #include <sys/sdt.h>
 #include <sys/signalvar.h>
@@ -76,6 +79,12 @@ __FBSDID("$FreeBSD$");
 #include <sys/syslog.h>
 #include <sys/systm.h>
 #include <sys/stats.h>
+#include <sys/kdb.h>
+#include <sys/taskqueue.h>
+
+#include <sys/lock.h>
+#include <sys/mutex.h>
+#include <sys/limits.h>
 
 #include <machine/cpu.h>	/* before tcp_seq.h, for tcp_random18() */
 
@@ -124,6 +133,13 @@ __FBSDID("$FreeBSD$");
 #include <netinet/tcp_offload.h>
 #endif
 #include <netinet/udp.h>
+
+#include <netinet/mptcp.h>
+#include <netinet/mptcp_pcb.h>
+#include <netinet/mptcp_var.h>
+#include <netinet/sctp_pcb.h>
+#include <netinet/sctp_auth.h>
+#include <netinet/sctp_constants.h>
 
 #include <netipsec/ipsec_support.h>
 
@@ -238,9 +254,13 @@ SYSCTL_INT(_net_inet_tcp, OID_AUTO, recvbuf_max, CTLFLAG_VNET | CTLFLAG_RW,
     &VNET_NAME(tcp_autorcvbuf_max), 0,
     "Max size of automatic receive buffer");
 
+MALLOC_DEFINE(M_DSSMAP, "dssmap", "Struct to hold dss maps");
+
 VNET_DEFINE(struct inpcbhead, tcb);
 #define	tcb6	tcb  /* for KAME src sync over BSD*'s */
 VNET_DEFINE(struct inpcbinfo, tcbinfo);
+
+static int tp_schedule_event(struct tcpcb *tp, int event);
 
 /*
  * TCP statistics are stored in an array of counter(9)s, which size matches
@@ -253,6 +273,8 @@ VNET_DEFINE(counter_u64_t, tcps_states[TCP_NSTATES]);
 SYSCTL_COUNTER_U64_ARRAY(_net_inet_tcp, TCPCTL_STATES, states, CTLFLAG_RD |
     CTLFLAG_VNET, &VNET_NAME(tcps_states)[0], TCP_NSTATES,
     "TCP connection counts by TCP state");
+
+#define MSBIT_CHECK 0x80000000
 
 static void
 tcp_vnet_init(const void *unused)
@@ -665,6 +687,7 @@ tcp_input_with_port(struct mbuf **mp, int *offp, int proto, uint16_t port)
 #endif /* INET6 */
 	struct tcpopt to;		/* options in this segment */
 	char *s = NULL;			/* address and port logging */
+	int tried_join_locate = 0;
 #ifdef TCPDEBUG
 	/*
 	 * The size of tcp_saveipgen must be the size of the max ip header,
@@ -924,6 +947,61 @@ findpcb:
 		    m->m_pkthdr.rcvif, m);
 #endif /* INET */
 
+	/* Might be a join. rough method for locating the mpcb and creating
+	 * a subflow to handle the incoming. This is used for implicit joins
+	 * (i.e. in cases where an inpcb has not been set up for an address
+	 * pair). Should have a sysctl that controls whether to allow implicit
+	 * joins. */
+	if ((thflags & TH_SYN) && !tried_join_locate) {
+        tcp_dooptions(&to, optp, optlen, TO_SYN);
+
+		/* Returns with mp locked. */
+		if (to.to_mopts.mpo_flags & MPOF_JOIN_SYN) {
+			struct mpcb *mp = NULL;
+
+			/* Might have pulled an inpcb out if joining to the
+			 * address bound as server (would match wildcard src)
+			 *
+			 * XXXNJW: but if the inpcb is pre-allocated, then we
+			 * don't want to override this. need to add a check to
+			 * make sure we don't ignore a valid inpcb and create
+			 * a new one for nothing. (or alternativley, could
+			 * never pre-alloc the inpcb for a subflow).
+			 */
+			if (inp) {
+				INP_WUNLOCK(inp);
+
+				/* XXXNJW a bit wasteful but do an exact lookup.
+				 * if we find an existing inpcb then drop. */
+				inp = in_pcblookup_mbuf(&V_tcbinfo, ip->ip_src,
+					th->th_sport, ip->ip_dst, th->th_dport,
+					INPLOOKUP_WLOCKPCB, m->m_pkthdr.rcvif, m);
+				if(inp) {
+					printf("%s: join on existing tuple\n", __func__);
+					goto dropunlock;
+				}
+			}
+			tried_join_locate = 1;
+			/* Retuns with MP locked */
+			mp = mp_locate_mpcb(to.to_mopts.rcv_token);
+
+			/* if it belongs to an existing mp connection, create a new
+			 * subflow, insert into has list then jump back to findpcb. */
+			if (mp != NULL) {
+				int error_t = 0;
+				/* Drops the mp lock */
+				error_t = mp_create_subflow_implicit(mp,
+					mp->mp_mppcb->mpp_socket, ip, th);
+				if (!error_t)
+					goto findpcb;
+			} else {
+				printf("%s: failed to locate mpcb\n", __func__);
+				goto dropwithreset;
+			}
+		}
+	}
+
+
 	/*
 	 * If the INPCB does not exist then all data in the incoming
 	 * segment is discarded and an appropriate RST is sent back.
@@ -1069,6 +1147,211 @@ findpcb:
 		tcp_savetcp = *th;
 	}
 #endif /* TCPDEBUG */
+
+
+/* MPTCP JOIN */
+	/*
+	 * alternate processing for JOINs (rather than syncache). When we get
+	 * an initial SYN or an ACK of our SYN/ACK
+	 */
+	if ((so->so_options & SO_ACCEPTCONN) &&
+	    (tp->t_sf_flags & SFF_PASSIVE_JOIN)) {
+
+		/* process the options now, as we need to parse the MP_JOIN options */
+		tcp_dooptions(&to, optp, optlen, TO_SYN);
+
+		/* Got an ACK for a SYN/ACK */
+		if (to.to_mopts.mpo_flags & MPOF_JOIN_ACK) {
+			INP_INFO_WLOCK_ASSERT(&V_tcbinfo);
+
+			printf("%s: got ack of join syn/ack\n", __func__);
+
+			so->so_options &= ~SO_ACCEPTCONN;
+
+			/* syncache _socket/_expand would have:
+			 * - marked the socket connected
+			 * - init'd tp->irs
+			 * - transitioned to TCPS_SYN_RECEIVED
+			 * - ??? */
+
+			/*
+			 * Segment validation: the following are taken from syncache_expand
+			 * but adapted to work with a regular tcpcb (as used by passive
+			 * side of mp_join).
+			 */
+
+			/*ACK must match our initial sequence number + 1 (the SYN|ACK). */
+			if (th->th_ack != tp->iss + 1)
+				goto dropwithreset;;
+
+			/* The SEQ must fall in the window starting at the received
+			 * initial receive sequence number + 1 (the SYN). */
+			if (SEQ_LEQ(th->th_seq, tp->irs) ||
+			    SEQ_GT(th->th_seq, tp->irs + tp->rcv_wnd))
+				goto dropwithreset;
+
+			/* If timestamps were not negotiated during SYN/ACK they
+			 * must not appear on any segment during this session. */
+			if (!(tp->t_flags & TF_RCVD_TSTMP) && (to.to_flags & TOF_TS))
+				goto dropwithreset;
+
+			/* The following is based on behaviour of syncache_socket */
+			soisconnected(so);
+			tp->t_state = TCPS_SYN_RECEIVED;
+			tcp_rcvseqinit(tp);
+			tcp_sendseqinit(tp);
+			tp->rcv_adv += tp->rcv_wnd;
+			tp->snd_wl1 = tp->irs;
+			tp->snd_max = tp->iss + 1;
+			tp->snd_nxt = tp->iss + 1;
+			tp->rcv_up = tp->irs + 1;
+			tp->last_ack_sent = tp->rcv_nxt;
+            tp->t_mp_conn.ds_last_dsn = tp->rcv_nxt;
+
+			/* Other timers are activated in e.g. tcp_do_segment, tcp_output */
+			tcp_timer_activate(tp, TT_KEEP, TP_KEEPINIT(tp));
+
+			KASSERT(tp->t_state == TCPS_SYN_RECEIVED,
+				("%s: ", __func__));
+
+			/*
+			 * Process the segment and the data it
+			 * contains.  tcp_do_segment() consumes
+			 * the mbuf chain and unlocks the inpcb.
+			 */
+			tcp_do_segment(m, th, so, tp, drop_hdrlen, tlen,
+				iptos, ti_locked);
+			INP_INFO_UNLOCK_ASSERT(&V_tcbinfo);
+			return (IPPROTO_DONE);
+
+		}
+
+		/* XXXNJW: the following duplicates a lot of code from the
+		 * pre- syncache_add validation of SYN segments. Will need to
+		 * refactor */
+		if (thflags & TH_RST)
+			goto dropunlock;
+
+		/*
+		 * We can't do anything without SYN.
+		 */
+		if ((thflags & TH_SYN) == 0)
+			goto dropunlock;
+
+		/*
+		 * (SYN|ACK) is bogus on a listen socket.
+		 */
+		if (thflags & TH_ACK) {
+			TCPSTAT_INC(tcps_badsyn);
+			rstreason = BANDLIM_RST_OPENPORT;
+			goto dropwithreset;
+		}
+
+		KASSERT((thflags & (TH_RST|TH_ACK)) == 0,
+			("%s: Listen socket: TH_RST or TH_ACK set", __func__));
+		KASSERT(thflags & (TH_SYN),
+			("%s: Listen socket: TH_SYN not set", __func__));
+
+		if (th->th_dport == th->th_sport &&
+			ip->ip_dst.s_addr == ip->ip_src.s_addr) {
+//			if ((s = tcp_log_addrs(&inc, th, NULL, NULL)))
+//				log(LOG_DEBUG, "%s; %s: Listen socket: "
+//				"Connection attempt from/to self "
+//				"ignored\n", s, __func__);
+			goto dropunlock;
+		}
+		if (IN_MULTICAST(ntohl(ip->ip_dst.s_addr)) ||
+			IN_MULTICAST(ntohl(ip->ip_src.s_addr)) ||
+			ip->ip_src.s_addr == htonl(INADDR_BROADCAST) ||
+			in_broadcast(ip->ip_dst, m->m_pkthdr.rcvif)) {
+//			if ((s = tcp_log_addrs(&inc, th, NULL, NULL)))
+//				log(LOG_DEBUG, "%s; %s: Listen socket: "
+//				"Connection attempt from/to broad- "
+//				"or multicast address ignored\n",
+//				s, __func__);
+			goto dropunlock;
+		}
+
+		/*
+		 * Got MP_JOIN option. If the length is correct tcp_output
+		 * will check this flag for MPOF_MP_JOIN and send a SYNACK
+		 * with MP_JOIN option. Otherwise just discard the segment.
+		 */
+		if (to.to_mopts.mpo_flags & MPOF_JOIN_SYN) {
+			struct in_conninfo inc;
+            int error = 0;
+
+			KASSERT(tp->t_state == TCPS_LISTEN, ("%s: so accepting but "
+				"tp not listening", __func__));
+			bzero(&inc, sizeof(inc));
+			{
+			    inc.inc_faddr.s_addr = ip->ip_src.s_addr;
+			    inc.inc_laddr.s_addr = ip->ip_dst.s_addr;
+			}
+			inc.inc_fport = th->th_sport;
+			inc.inc_lport = th->th_dport;
+			inc.inc_fibnum = so->so_fibnum;
+
+			mp_debug(MPSESSION, 2, 0, "%s: got JOIN_SYN\n", __func__);
+			/*
+			 * Got a MP_JOIN_SYN option. Need to send a JOIN_SYNACK
+			 * in reponse.
+			 */
+			if (to.to_mopts.optlen != MPTCP_SUBLEN_MP_JOIN_SYN) {
+				to.to_mopts.mpo_flags &= ~MPOF_MP_JOIN;
+				goto dropwithreset;
+			}
+
+			tp->snd_wnd = th->th_win;
+			if (to.to_flags & TOF_TS) {
+			    tp->t_flags |= TF_RCVD_TSTMP;
+			    tp->ts_recent = to.to_tsval;
+			    tp->ts_recent_age = tcp_ts_getticks();
+			}
+
+            if (to.to_flags & TOF_MSS)
+            	tcp_mss(tp, to.to_mss);
+        	if ((tp->t_flags & TF_SACK_PERMIT) &&
+        	    (to.to_flags & TOF_SACKPERM) == 0)
+        		tp->t_flags &= ~TF_SACK_PERMIT;
+
+			if (!(to.to_flags & TOF_SACK))
+				tp->t_flags &= ~TF_SACK_PERMIT;
+
+			if ((to.to_flags & TOF_SCALE) && (tp->t_flags & TF_REQ_SCALE)) {
+				int wscale = 0;
+			    tp->t_flags |= TF_RCVD_SCALE;
+			    tp->snd_scale = to.to_wscale;
+
+			    while (wscale < TCP_MAX_WINSHIFT &&
+			        (TCP_MAXWIN << wscale) < sb_max)
+			    	    wscale++;
+			    tp->request_r_scale = wscale;
+			}
+
+			tp->t_mp_conn.remote_rand = to.to_mopts.snd_rnd;
+			tp->t_mp_conn.mp_conn_token = to.to_mopts.rcv_token; // might not need to keep this
+            tp->t_mp_conn.local_rand = arc4random();
+
+            tp->t_sf_state |= SFS_MP_CONNECTING;
+			tp->t_sf_flags |= SFF_GOT_JOIN_SYN;
+			error = mp_join_respond(so, tp, &inc);
+            if (error)
+            	printf("%s: error %d\n", __func__, error);
+
+			if (ti_locked == TI_WLOCKED) {
+				INP_INFO_WUNLOCK(&V_tcbinfo);
+				ti_locked = TI_UNLOCKED;
+			}
+			INP_INFO_UNLOCK_ASSERT(&V_tcbinfo);
+			return (IPPROTO_DONE);
+		}
+
+		/* XXXNJW: think more about what to do in this case. */
+		goto dropwithreset;
+	}
+/* MPTCP JOIN end */
+
 	/*
 	 * When the socket is accepting connections (the INPCB is in LISTEN
 	 * state) we look into the SYN cache if this is a new connection
@@ -1546,6 +1829,13 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 	struct tcpopt to;
 	int tfo_syn;
 	u_int maxseg;
+	struct ds_map* map = NULL;
+
+	/* MPTCP */
+	struct mbuf *m_ptr = NULL;
+    struct mpcb *mp = tp->t_mpcb;
+    int mp_wakeup = 0;
+    mpp_pcbref(mp->mp_mppcb);
 
 #ifdef TCPDEBUG
 	/*
@@ -1673,6 +1963,330 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 			 TSTMP_LT(to.to_tsecr, tp->t_badrxtwin))
 			cc_cong_signal(tp, th, CC_RTO_ERR);
 	}
+
+    /* Header contains MPTCP options */
+	/* Currently double up on mbufs that are enqueued if
+	 * we get signaling and some data - i.e. the mbuf will
+	 * be copied with the header, and the segment itself
+	 * will be inserted throught the reass process. Though
+	 * this double processes the same mbuf, it allows
+	 * in-order messages to be passed to the mp-layer even
+	 * if the asscociated data is out-of-order at the
+	 * subflow level. */
+	if ((to.to_flags & TOF_MPTCP)) {
+
+		if (to.to_mopts.mpo_flags &
+		    (MPOF_DATA_ACK | MPOF_ADD_ADDR_V4 | MPOF_ADD_ADDR_V6)) {
+
+			if (to.to_mopts.mpo_flags & MPOF_ADD_ADDR_V4)
+				printf("%s: got add_addr\n", __func__);
+
+			// we have a DACK, need to copy the mbuf to
+			// pass to the mp-layer.
+			// a DACK on a segment carrying data means we
+			// end up with two copies of the segment. (one
+			// with whole segment, one with dropped header
+			// and mbuf tag).
+			if (m_ptr == NULL)
+				m_ptr =  m_copypacket(m, M_NOWAIT);
+			else
+			    mp_appendpkt(m_ptr, m_copypacket(m, M_NOWAIT));
+		}
+
+		/* XXXNJW: Got a d-fin. The adjustment for the dfin happens in
+		 * another thread, need to test to make sure this all works okay
+		 * if there happens to also be data on the segment as well. */
+		if (to.to_mopts.mpo_flags & MPOF_DATA_FIN) {
+			/* DFIN only, without any other data. */
+			if (to.to_mopts.sub_seq_num == 0) {
+				struct dsn_tag *dtag = (struct dsn_tag *)
+					m_tag_alloc(PACKET_COOKIE_MPTCP, PACKET_TAG_DSN,
+						DSN_TAG_LEN, M_NOWAIT); // space for 64-bit DSN
+				struct m_tag *mtag = &dtag->tag;
+
+				dtag->dsn = to.to_mopts.data_seq_num;
+				dtag->dss_flags |= MP_DFIN;
+				m_tag_prepend(m, mtag);
+
+				/* get rid of the tcp/ip headers */
+				m_adj(m, drop_hdrlen);
+
+				/* queue up for processing. in mp_input this segment
+				 * will be  */
+				if (m_ptr == NULL)
+					m_ptr = m_copypacket(m, M_NOWAIT);
+				else
+				    mp_appendpkt(m_ptr, m_copypacket(m, M_NOWAIT));
+
+			}
+
+			/* If there's other data attached, then it will go
+			 * via reass. */
+		}
+
+		/*
+		 * Do we need to send a data-level ACK in response
+		 * to this segment?
+		 * XXXNJW: related to MP_JOINs, but might not
+		 * need to use this (could check for the join
+		 * option flag).
+		 */
+		if (to.to_mopts.mpo_flags & MPOF_NEED_ACK)
+			tp->t_flags |= TF_ACKNOW;
+
+		/* For MP_JOINs on existing MP sessions */
+		/* XXXNJW: Should not need the check here for FIRSTSUBFLOW - use the
+		 * MP_JOIN or MP_CAPABLE options to figure this out.*/
+		if ((tp->t_sf_state & SFS_MP_CONNECTING) &&
+			(to.to_mopts.mpo_flags & MPOF_JOIN_ACK)) {
+			if (to.to_mopts.optlen == MPTCP_SUBLEN_MP_JOIN_ACK) {
+				// add the join stuff back in... which would be?
+			}
+		} /* End join processing */
+
+		/*
+		 * Got a new DSS mapping for this subflow.
+		 */
+		if ((to.to_mopts.mpo_flags & MPOF_DSS)) {
+
+			tp->t_mp_conn.ds_last_dsn = to.to_mopts.data_seq_num;
+
+			if ((to.to_mopts.mpo_flags & MPOF_DSN_MAP) &&
+				!((to.to_mopts.mpo_flags & MPOF_DATA_FIN)
+				&& to.to_mopts.dss_data_len == 1)) {
+
+				/* got a DSN with no length, drop to infinite mapping */
+				if (to.to_mopts.dss_data_len == 0)
+					panic("dropping back to infinite map not implemented\n");
+
+				struct ds_map *temp_map, *temp_map2, *next_map = NULL;
+				int found_dup_map = 0;
+
+				/* find the map that this segment belongs to */
+				TAILQ_FOREACH_SAFE(temp_map, &tp->t_rcv_maps.dsmap_list,
+						sf_ds_map_next, temp_map2) {
+
+					/* Found a completed map, so remove it from t_rxdmaps */
+					if (SEQ_GEQ(tp->rcv_nxt,temp_map->sf_seq_start
+						+ temp_map->ds_map_len)) {
+						mp_debug(DSMAP, 4, 0, "remove map: sf_seq_start: %u. "
+								"end: %u\n", temp_map->sf_seq_start,
+								temp_map->sf_seq_start + temp_map->ds_map_len);
+						TAILQ_REMOVE(&tp->t_rcv_maps.dsmap_list, temp_map,
+							sf_ds_map_next);
+						free(temp_map, M_DSSMAP);
+						continue;
+					}
+
+					if (!next_map) {
+						int map_offset = 0;
+						tcp_seq new_sf_map_start =
+							to.to_mopts.sub_seq_num + tp->irs;
+						tcp_seq temp_map_end =
+							temp_map->sf_seq_start + temp_map->ds_map_len;
+						map_offset = new_sf_map_start - temp_map->sf_seq_start;
+
+						/* A segment part-way into an already recv'd mapping? */
+	//					if (new_sf_map_start > temp_map->sf_seq_start &&
+	//						to.to_mopts.data_seq_num == temp_map->ds_map_start) {
+						// XXXNJW this would be a broken mapping
+						// (SSN, DSN) out of sync
+
+						/* is this map fully covered by an existing map? If yes
+						 * then it doesn't tell us anything we don't already know,
+						 * use the existing map from here on.
+						 */
+						if (new_sf_map_start >= temp_map->sf_seq_start &&
+							(to.to_mopts.dss_data_len + map_offset <=
+							temp_map->ds_map_len)) {
+	//
+	//						/* double check that DSNs are aligned, if so set dup */
+	//						if (temp_map->ds_map_start + map_offset ==
+	//						    to.to_mopts.data_seq_num) {
+	//							found_dup_map = 1;
+	//							map = temp_map;
+	//						}
+							found_dup_map = 1;
+							map = temp_map;
+
+						}
+
+						/* An unseen map, therefore should be inserted before
+						 * temp_map in our map list
+						 *
+						 * Some wrap detection: the 0xC000... is a simple (too
+						 * simple?) test to see if the new map occurs after a wrap.
+						 * Included edge case where map ends exactly on the end of
+						 * the sequence space.
+						 */
+						if ((new_sf_map_start > temp_map_end &&
+							(temp_map_end > temp_map->sf_seq_start ||
+							(new_sf_map_start & 0xC0000000) == 0)) ||
+							(temp_map_end == UINT_MAX && new_sf_map_start == 0)) {
+							next_map = temp_map;
+						}
+
+					}
+
+				}
+
+				/*
+				 * If we do not find a map covered by this sequence number,
+				 * allocate a new map and put into mapping list.
+				 * Also for cases where !has_dsn_map (map will be NULL
+				 * in this case)
+				 */
+				if (!found_dup_map) {
+
+					/* XXX: should use zone allocator */
+					map = malloc(sizeof(struct ds_map), M_DSSMAP, M_NOWAIT);
+
+					/* set values for mapping */
+					map->ds_map_start = to.to_mopts.data_seq_num;
+					map->sf_seq_start = to.to_mopts.sub_seq_num + tp->irs;
+					map->ds_map_len = map->ds_map_offset =
+						to.to_mopts.dss_data_len;
+					map->ds_map_csum = to.to_mopts.dss_csum;
+
+					mp_debug(DSMAP, 4, 0, "%s: inserting map sf_seq_start %u, "
+						"end %u seq: %u\n", __func__, map->sf_seq_start,
+						map->sf_seq_start + map->ds_map_len, th->th_seq);
+
+					/* if there are no existing maps insert at head. Other
+					 * wise insert in sequence */
+					if (next_map == NULL) {
+	//					KASSERT(TAILQ_EMPTY(&tp->t_rxdsmaps),
+	//						("Incoming sequence %u less than those in rx maps\n"));
+	//					TAILQ_INSERT_HEAD(&tp->t_rxdsmaps, map, sf_ds_map_next);
+						if (TAILQ_EMPTY(&tp->t_rcv_maps.dsmap_list) ||
+							map->sf_seq_start == tp->rcv_nxt) {
+							TAILQ_INSERT_TAIL(&tp->t_rcv_maps.dsmap_list, map,
+								sf_ds_map_next);
+						} else {
+							goto dropafterack;
+						}
+					} else {
+						TAILQ_INSERT_BEFORE(next_map, map, sf_ds_map_next);
+					}
+				}
+			}
+		} /* End DSS Map processing */
+	} /* TOF_MPTCP */
+
+	/* Does the incoming segment have len beyond the headers?
+	 * If so, need to apply a dsn tag to it, regardless of if
+	 * the segment came with a dsn option, or whether we are
+	 * in MP or standard TCP modes. */
+	if (tlen) {
+		/* XXXNJW - Handling RST segments with payloads (reset cause)
+		 * skip processing for RST payloads? A RST on a single
+		 * subflow might include some payload explaining the RST
+		 * cause. Consider this as not part of the data-level
+		 * stream so should not attempt to reassemble, as it will
+		 * break the data-level mappings.
+		 */
+
+		/* Tag the mbuf with data-level sequence number. A direct
+		 * map will map the tcp sequence number directly to the
+		 * data sequence number. Otherwise calculate the dsn and
+		 * tag the mbuf with this value. */
+		struct dsn_tag *dtag = (struct dsn_tag *)
+		    m_tag_alloc(PACKET_COOKIE_MPTCP, PACKET_TAG_DSN, DSN_TAG_LEN,
+		        M_NOWAIT); // space for 64-bit DSN
+		struct m_tag *mtag = &dtag->tag;
+
+		/*
+		 * Convert 32bit DS map start sequence numbers into 64 bit.
+		 */
+		if ((to.to_mopts.mpo_flags & MPOF_DSN64) == 0 &&
+			(to.to_mopts.mpo_flags & MPOF_DSN_MAP)) {
+			 dtag->dss_flags |= MPD_DSN32;
+		}
+
+		/* XXNJW: TODO
+		 * In multi-packet map scenario, the packet carrying the map
+		 * might be lost. Thus packets arriving after this will not
+		 * belong to an existing map. These packets are buffered while
+		 * we wait for the packet with the map to be retransmitted.
+		 * If the zone for buffering packets is exhausted, we simply send
+		 * an ACK and drop the segment, making the sender retransmit.
+		 * Otherwise we insert the segment into the list.
+		 */
+
+		// Could potentially expand the dtag to take both the sqn
+		// and dsn for each segment. The dsn will be non-valid for
+		// standard TCP connections but at least the subflow won't
+		// need to know about whether MP is enabled (i.e. always
+		// behave the same).
+
+		if ((tp->t_sf_state & SFS_MP_ENABLED) == 0) {
+//			uint64_t t_dsn;
+//			t_dsn = tp->t_mp_conn.ds_last_dsn
+//				+ tp->t_mp_conn.bytes_since_last_dsn;
+//			tp->t_mp_conn.bytes_since_last_dsn += tlen;
+			dtag->dsn = th->th_seq;
+		} else {
+			if (map == NULL) {
+				/* find the map that this segment belongs to. First map that
+				 * incoming subflow seq num is larger than. This is for cases
+				 * where  */
+				TAILQ_FOREACH(map, &tp->t_rcv_maps.dsmap_list, sf_ds_map_next) {
+					/*
+					 * XXXNJW: The following panic needs to be changed to handle
+					 * the buffering of packets beyond the mapped area (for cases where
+					 * the DSN-carrying packet has been lost, or arrives out of order.
+					 *
+					 * XXXNJW: Collapse this into a single block once verified
+					 */
+//					if (map->sf_seq_start + map->ds_map_len > map->sf_seq_start) {
+//						if (th->th_seq > map->sf_seq_start + map->ds_map_len)
+//							panic("%s: Received data beyond end of mapped region."
+//							"ssn: %u, mapstart %u, maplen %u\n",
+//							__func__, th->th_seq, map->sf_seq_start, map->ds_map_len);
+//					} else {
+//						if ((th->th_seq > map->sf_seq_start + map->ds_map_len) &&
+//						    (th->th_seq < map->sf_seq_start))
+//							panic("%s: Received data beyond end of mapped region."
+//							"ssn: %u, mapstart %u, maplen %u\n",
+//							__func__, th->th_seq, map->sf_seq_start, map->ds_map_len);
+//					}
+
+					uint32_t seqnum = th->th_seq;
+					uint32_t sf_seq_end = map->sf_seq_start + map->ds_map_len;
+					if ((seqnum >= map->sf_seq_start && sf_seq_end > map->sf_seq_start
+						&& seqnum < sf_seq_end) ||
+						(sf_seq_end < map->sf_seq_start && seqnum < map->sf_seq_start
+						&& seqnum < sf_seq_end) ||
+						(sf_seq_end < map->sf_seq_start && seqnum >= map->sf_seq_start
+						&& seqnum <= UINT_MAX)) {
+							/* A map exists for this packet */
+							mp_debug(DSMAP, 4, 0, "found map: ds_map_start %ju, "
+							"sd_seq_start: %u. len: %d\n", map->ds_map_start,
+							map->sf_seq_start, map->ds_map_len);
+							break;
+					}
+				}
+			}
+
+			/* Must have a valid map beyond this point */
+			KASSERT(map != NULL, ("%s:%d No map found for packet with "
+			    "sqn %u\n", __func__, __LINE__, th->th_seq));
+
+			/* update mbuf tag with current data seq num */
+			dtag->dsn = map->ds_map_start + (th->th_seq - map->sf_seq_start);
+//			printf("%s: sub dsn %u\n", __func__, (uint32_t) th->th_seq);
+//			printf("%s: map dsn %ju\n", __func__, dtag->dsn);
+		}
+
+		/* Set D-Fin flag if this DSS had a dfin on it. */
+		if (to.to_mopts.mpo_flags & MPOF_DATA_FIN)
+		    dtag->dss_flags |= MP_DFIN;
+
+		/* And prepend the mtag to mbuf, to be checked in reass */
+		m_tag_prepend(m, mtag);
+	} /* End tlen > 0 */
+
+
 	/*
 	 * Process options only when we get SYN/ACK back. The SYN case
 	 * for incoming connections is handled in tcp_syncache.
@@ -1715,6 +2329,63 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 		    (!(to.to_flags & TOF_SACKPERM) ||
 		    (tp->t_flags & TF_NOOPT)))
 			tp->t_flags &= ~TF_SACK_PERMIT;
+		/* MP-options only used during connection setup. */
+		if (to.to_flags & TOF_MPTCP) {
+			if (tp->t_sf_flags & SFF_SENT_MPCAPABLE) {
+				mp_process_remote_key(&tp->t_mp_conn,
+					to.to_mopts.remote_key);
+				/* send mp_cabable ACK, got SYN/ACK. NOTE this is
+				 * different to JOIN_SYNACK */
+				tp->t_sf_flags |= SFF_GOT_SYNACK;
+				/* enable csum if remote end sets csum bit */
+				if (to.to_mopts.mpo_flags & MPOF_USE_CSUM)
+					tp->t_mpcb->csum_enabled = 1;
+			} else {
+				/* got a MP_CAPABLE but did not send this option */
+				// XXXNJW: If we did not send an MP_CAPABLE, the
+				// response should not include the option. Either
+				// drop the segment or just ignore and continue on
+				// with standard TCP.
+			}
+
+			/* could be a subflow SYN/ACK */
+			if (to.to_mopts.mpo_flags & MPOF_JOIN_SYNACK) {
+				if (to.to_mopts.mpo_flags & MPOF_BACKUP_PATH) {
+					// XXXNJW tbd: this flow is a backup path
+					// should drop the subflow rather than panic the
+					// host
+					panic("Backup subflows not supported yet\n");
+				}
+
+				tp->t_mp_conn.hmac_trun_remote = to.to_mopts.snd_trc_mac;
+				tp->t_mp_conn.remote_rand = to.to_mopts.snd_rnd;
+
+				/* Calculate a MAC to return in the MP_JOIN ACK using
+				 * the random number just rcvd, and the keys from the
+				 * initial mp establishment
+				 */
+
+				/* MAC-A */
+				uint32_t mac_len = mp_get_hmac(tp->t_mp_conn.hmac_local,
+						tp->t_mp_conn.local_key, tp->t_mp_conn.remote_key,
+						tp->t_mp_conn.local_rand,
+						tp->t_mp_conn.remote_rand);
+
+				if (mac_len == 0) {
+					mp_debug(MPSESSION, 4, 0,"%s: error computing MAC-A\n",
+						__func__);
+					goto dropwithreset;
+				}
+
+				// XXXNJW: Need to validate the HMACs before continuing
+				// i.e. calculate the remote hmac and compare the leftmost
+				// 64 bits with the those in the truncated HMAC
+
+				tp->t_sf_flags |= SFF_GOT_JOIN_SYNACK;
+				mp_debug(MPSESSION, 4, 0,"%s: got join syn/ack\n",
+					__func__);
+			}
+		}
 		if (IS_FASTOPEN(tp->t_flags)) {
 			if ((to.to_flags & TOF_FASTOPEN) &&
 			    !(tp->t_flags & TF_NOOPT)) {
@@ -1879,7 +2550,15 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 				 */
 				cc_ack_received(tp, th, nsegs, CC_ACK);
 
+				/* Drop data from the send map */
+				dsmap_drop(&tp->t_send_maps.dsmap_list, th->th_ack, acked);
+
 				tp->snd_una = th->th_ack;
+
+				/* process ack at the mp-layer */
+				if ((tp->t_sf_state & SFS_MP_ENABLED) == 0)
+                    mp_wakeup |= MP_SCHEDINPUT;
+
 				/*
 				 * Pull snd_wl2 up to prevent seq wrap relative
 				 * to th_ack.
@@ -1927,7 +2606,9 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 			if ((tp->t_flags & TF_SACK_PERMIT) && tp->rcv_numsacks)
 				tcp_clean_sackreport(tp);
 			TCPSTAT_INC(tcps_preddat);
-			tp->rcv_nxt += tlen;
+			// tp->rcv_nxt += tlen;		// will cause accounting error
+										// as previously were appending
+										// directly from here.
 			if (tlen &&
 			    ((tp->t_flags2 & TF2_FBYTES_COMPLETE) == 0) &&
 			    (tp->t_fbyte_in == 0)) {
@@ -1946,9 +2627,9 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 			 * Pull rcv_up up to prevent seq wrap relative to
 			 * rcv_nxt.
 			 */
-			tp->rcv_up = tp->rcv_nxt;
-			TCPSTAT_ADD(tcps_rcvpack, nsegs);
-			TCPSTAT_ADD(tcps_rcvbyte, tlen);
+			tp->rcv_up += tlen;									// as we don't increment rcv_nxt above
+			TCPSTAT_INC(tcps_rcvpack);                          // just increment directly by tlen
+			TCPSTAT_ADD(tcps_rcvbyte, tlen);                    // rcv_nxt will be bumped in tcp_reass below
 #ifdef TCPDEBUG
 			if (so->so_options & SO_DEBUG)
 				tcp_trace(TA_INPUT, ostate, tp,
@@ -1959,23 +2640,33 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 			newsize = tcp_autorcvbuf(m, th, so, tp, tlen);
 
 			/* Add data to socket buffer. */
-			SOCKBUF_LOCK(&so->so_rcv);
-			if (so->so_rcv.sb_state & SBS_CANTRCVMORE) {
-				m_freem(m);
-			} else {
-				/*
-				 * Set new socket buffer size.
-				 * Give up when limit is reached.
+//			if (so->so_rcv.sb_state & SBS_CANTRCVMORE) {
+//				m_freem(m);
+//			} else {
+				/* XXXNJW: put the data into the subflow reass list. Don't
+				 * do a fastpath append as in standard implementation, though
+				 * could eventually put in a shortcut to adjust the subflow
+				 * accounting here and append directly to the mp-level list
+				 *
+				 * Should call tcp_reass and not do an append of the data
+				 * to the socket buffer. The wakeup that is usually here has
+				 * also been removed (wakeup will be triggered if we end up
+				 * appending segments at the data-level.
 				 */
-				if (newsize)
-					if (!sbreserve_locked(&so->so_rcv,
-					    newsize, so, NULL))
-						so->so_rcv.sb_flags &= ~SB_AUTOSIZE;
-				m_adj(m, drop_hdrlen);	/* delayed header drop */
-				sbappendstream_locked(&so->so_rcv, m, 0);
-			}
-			/* NB: sorwakeup_locked() does an implicit unlock. */
-			sorwakeup_locked(so);
+                m_adj(m, drop_hdrlen);	/* delayed header drop */
+				thflags = tcp_reass(tp, th, &tlen, m);
+
+				/* is there any new in-order data? */
+				if (tp->t_segq_received) {
+//					printf("%s:%d received seg sqn %u\n", __func__, __LINE__,
+//						th->th_seq);
+					if (m_ptr == NULL)
+						m_ptr = tp->t_segq_received;
+					else
+						mp_appendpkt(m_ptr, tp->t_segq_received);
+					tp->t_segq_received = NULL;
+				}
+//			}
 			if (DELAY_ACK(tp, tlen)) {
 				tp->t_flags |= TF_DELACK;
 			} else {
@@ -1991,6 +2682,10 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 	 * and then do TCP input processing.
 	 * Receive window is amount of space in rcv queue,
 	 * but not less than advertised window.
+	 * 
+	 * XXXNJW: When mptcp is active, want to use the
+	 * connection-level receive window, stored in the
+	 * mpcb.
 	 */
 	win = sbspace(&so->so_rcv);
 	if (win < 0)
@@ -2029,6 +2724,7 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 				goto drop;
 			}
 		}
+		tp->snd_una++;
 		break;
 
 	/*
@@ -2057,13 +2753,23 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 		if (!(thflags & TH_SYN))
 			goto drop;
 
+		/* Set initial receive values for tpcb and mpcb. initially we
+		 * are in infinite mapping mode so both set from tp->irs.
+		 * mp protocol specifies increment by 1. */
 		tp->irs = th->th_seq;
 		tcp_rcvseqinit(tp);
+        tp->t_mp_conn.ds_last_dsn = tp->rcv_nxt;
+//		if (tp->t_sf_flags & SFF_FIRSTSUBFLOW) {
+//			MP_INNER_LOCK(tp->t_mpcb);
+//			mp_rcvseqinit(tp->t_mpcb, tp);
+//			MP_INNER_UNLOCK(tp->t_mpcb);
+//		}
 		if (thflags & TH_ACK) {
 			int tfo_partial_ack = 0;
 
 			TCPSTAT_INC(tcps_connects);
 			soisconnected(so);
+			printf("%s: connected tp %p so %p\n", __func__, tp, so);
 #ifdef MAC
 			mac_socketpeer_set_from_mbuf(m, so);
 #endif
@@ -2118,6 +2824,28 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 				cc_conn_init(tp);
 				tcp_timer_activate(tp, TT_KEEP,
 				    TP_KEEPIDLE(tp));
+
+				/* MPTCP */
+				if (to.to_flags & TOF_MPTCP) {
+					/* Have also become an MPTCP connection. Let the mp
+					 * control layer know. */
+					if(tp->t_sf_flags & SFF_SENT_MPCAPABLE) {
+						tp->t_sf_flags &= ~SFF_INFINITEMAP;
+						tp->t_sf_state |= SFS_MP_ENABLED;
+						mp_wakeup |= tp_schedule_event(tp, SFE_MPESTABLISHED);
+					} else if(tp->t_sf_state & SFS_MP_CONNECTING) {
+						tp->t_sf_state &= ~SFS_MP_CONNECTING;
+						tp->t_sf_state |= SFS_MP_ENABLED;
+						mp_debug(MPSESSION, 1, 0,
+						    "%s:%d new mp connection for tp: %p: \n", __func__,
+						    __LINE__, tp);
+						mp_debug(MPSESSION, 4, 0,
+							"%s: set subflow as mp_active\n", __func__);
+					}
+				}
+				/* Let the mp control layer know that a subflow has
+				 * reached a connected state. */
+				mp_wakeup |= tp_schedule_event(tp, SFE_CONNECTED);
 			}
 		} else {
 			/*
@@ -2190,6 +2918,8 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 	 * drop leading data (and SYN); if nothing left, just ack.
 	 */
 	if (thflags & TH_RST) {
+		printf("%s: got RST, tseq %u last_ack %u rcv_nxt %u\n", __func__,
+			th->th_seq, tp->last_ack_sent, tp->rcv_nxt);
 		/*
 		 * RFC5961 Section 3.2
 		 *
@@ -2226,9 +2956,18 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 				close:
 					/* FALLTHROUGH */
 				default:
+					printf("%s: close after RST\n", __func__);
 					tp = tcp_close(tp);
+
+					/* XXXNJW: This will ensure that a close is
+					 * called on the subflow socket, as the wakeups
+					 * (in tcp_drop) won't actually cause a close in this
+					 * case. */
+					if (tp->t_sf_state & SFS_MP_ENABLED)
+                        mp_wakeup |= MP_SCHEDCLOSE;
 				}
 			} else {
+				printf("%s: send RST challenge\n", __func__);
 				TCPSTAT_INC(tcps_badrst);
 				/* Send challenge ACK. */
 				tcp_respond(tp, mtod(m, void *), th, m,
@@ -2354,6 +3093,16 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 		drop_hdrlen += todrop;	/* drop from the top afterwards */
 		th->th_seq += todrop;
 		tlen -= todrop;
+
+		/* dsn should be incremented by the same length as th_seq */
+		if (map) {
+			struct m_tag *mtag =  m_tag_locate(m, PACKET_COOKIE_MPTCP,
+			    PACKET_TAG_DSN, NULL);
+			KASSERT(mtag != NULL, ("%s segment %u missing an mbuf tag\n",
+			    __func__, th->th_seq - todrop));
+			((struct dsn_tag *)mtag)->dsn += todrop;
+		}
+
 		if (th->th_urp > todrop)
 			th->th_urp -= todrop;
 		else {
@@ -2404,6 +3153,14 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 				goto dropafterack;
 		} else
 			TCPSTAT_ADD(tcps_rcvbyteafterwin, todrop);
+
+		//XXXNJW: Were issues with trimming the end of an incoming segment
+		// that would mess up the dsn/ssn mappings and cause a stall. This
+		// might have been fixed so should try removing this and testing.
+		// So what happens now is that segments that are trimmed due to having
+		// length past the rcv win are dropped altogether.
+		goto dropafterack;
+
 		m_adj(m, -todrop);
 		tlen -= todrop;
 		thflags &= ~(TH_PUSH|TH_FIN);
@@ -2501,6 +3258,29 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 			if (!IS_FASTOPEN(tp->t_flags))
 				cc_conn_init(tp);
 			tcp_timer_activate(tp, TT_KEEP, TP_KEEPIDLE(tp));
+
+			/* MPTCP */
+			mp_wakeup |= tp_schedule_event(tp, SFE_CONNECTED);
+			if (to.to_flags & TOF_MPTCP) {
+				/* Have also become an MPTCP connection. Let the mp
+				 * control layer know. */
+				if(tp->t_sf_flags &
+				    (SFF_SENT_MPCAPABLE | SFF_FIRSTSUBFLOW)) {
+					tp->t_sf_state &= ~SFS_MP_CONNECTING;
+					tp->t_sf_flags &= ~SFF_INFINITEMAP;
+					tp->t_sf_state |= SFS_MP_ENABLED;
+					mp_wakeup |= tp_schedule_event(tp, SFE_MPESTABLISHED);
+				} else if(!(tp->t_sf_flags & SFF_FIRSTSUBFLOW)
+			          && (tp->t_sf_state & SFS_MP_CONNECTING)) {
+					tp->t_sf_state &= ~SFS_MP_CONNECTING;
+					tp->t_sf_state |= SFS_MP_ENABLED;
+					mp_debug(MPSESSION, 1, 0,
+						"%s:%d new mp connection for tp: %p: \n", __func__,
+						__LINE__, tp);
+					mp_debug(MPSESSION, 4, 0, "%s: set subflow as mp_active\n",
+					    __func__);
+				}
+			}
 		}
 		/*
 		 * Account for the ACK of our SYN prior to
@@ -2516,6 +3296,15 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 		if (tlen == 0 && (thflags & TH_FIN) == 0) {
 			(void) tcp_reass(tp, (struct tcphdr *)0, NULL, 0,
 			    (struct mbuf *)0);
+			if (tp->t_segq_received) {
+//				printf("%s:%d received seg sqn %u\n", __func__, __LINE__,
+//				    th->th_seq);
+				if (m_ptr == NULL)
+					m_ptr = tp->t_segq_received;
+				else
+					mp_appendpkt(m_ptr, tp->t_segq_received);
+				tp->t_segq_received = NULL;
+			}
 			tcp_handle_wakeup(tp, so);
 		}
 		tp->snd_wl1 = th->th_seq - 1;
@@ -2570,6 +3359,15 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 					tp->t_dupacks = 0;
 					break;
 				}
+
+				/* XXXNJW: don't want to mark MPTCP signal-only
+				 * packets as dupacks. Find a nicer way to deal with
+				 * this. What about dup DFINs? */
+				if (to.to_mopts.mpo_flags &
+				    (MPOF_DATA_ACK | MPOF_DSN_MAP | MPOF_DATA_FIN)) {
+					tp->t_dupacks = 0;
+				}
+
 				TCPSTAT_INC(tcps_rcvdupack);
 				/*
 				 * If we have outstanding data (other than
@@ -2971,6 +3769,9 @@ process_ACK:
 				tp->snd_wnd = 0;
 			ourfinisacked = 0;
 		}
+		dsmap_drop(&tp->t_send_maps.dsmap_list, th->th_ack,
+		    (ourfinisacked ? (int)sbavail(&so->so_snd) : acked));
+
 		/* NB: sowwakeup_locked() does an implicit unlock. */
 		sowwakeup_locked(so);
 		m_freem(mfree);
@@ -2985,6 +3786,10 @@ process_ACK:
 			EXIT_RECOVERY(tp->t_flags);
 		}
 		tp->snd_una = th->th_ack;
+
+		if ((tp->t_sf_state & SFS_MP_ENABLED) == 0)
+			mp_wakeup |= MP_SCHEDINPUT;
+
 		if (tp->t_flags & TF_SACK_PERMIT) {
 			if (SEQ_GT(tp->snd_una, tp->snd_recover))
 				tp->snd_recover = tp->snd_una;
@@ -3011,6 +3816,8 @@ process_ACK:
 				 * we should release the tp also, and use a
 				 * compressed state.
 				 */
+				mp_debug(MPSESSION, 1, 0,
+					"%s: FIN is acked, enter FINWAIT_2 tp %p\n", __func__, tp);
 				if (so->so_rcv.sb_state & SBS_CANTRCVMORE) {
 					soisdisconnected(so);
 					tcp_timer_activate(tp, TT_2MSL,
@@ -3030,8 +3837,15 @@ process_ACK:
 		 */
 		case TCPS_CLOSING:
 			if (ourfinisacked) {
+				if (tp->t_sf_state & SFS_MP_ENABLED)
+					mp_wakeup |= MP_SCHEDDETACH;
 				tcp_twstart(tp);
 				m_freem(m);
+				if (mp_wakeup)
+					goto mp_input;
+				else
+					mpp_pcbrele_unlocked(mp->mp_mppcb);
+
 				return;
 			}
 			break;
@@ -3044,7 +3858,20 @@ process_ACK:
 		 */
 		case TCPS_LAST_ACK:
 			if (ourfinisacked) {
+				printf("%s: subflow acked in LAST_ACK tp %p\n", __func__, tp);
+				/* XXXNJW: to change.
+				 * For MP connections we track the count of subflows
+				 * and decrement as they close (in another thread).
+				 * Also clear the "MP_SCHEDINPUT" so we don't trigger
+				 * input processing in response to earlier segment
+				 * processing (as the inpcb/tcpcb won't exist soon
+				 * anyway) */
 				tp = tcp_close(tp);
+				mp_wakeup &= ~MP_SCHEDINPUT;
+				if (tp != NULL)
+					mp_wakeup |= MP_SCHEDCLOSE; /* Cases of disconnect only */
+				else
+					mp_wakeup |= MP_SCHEDDETACH;
 				goto drop;
 			}
 			break;
@@ -3155,6 +3982,11 @@ dodata:							/* XXX */
 		tcp_seq save_rnxt  = tp->rcv_nxt;
 		int     save_tlen  = tlen;
 		m_adj(m, drop_hdrlen);	/* delayed header drop */
+		if (thflags & TH_FIN)
+			mp_debug(MPSESSION, 1, 0, "%s:%d: got FIN on tp %p\n", __func__,
+			    __LINE__, tp);
+ 		/*
+		 * XXXNJW: Need to adapt this comment
 		/*
 		 * Insert segment which includes th into TCP reassembly queue
 		 * with control block tp.  Set thflags to whether reassembly now
@@ -3167,44 +3999,72 @@ dodata:							/* XXX */
 		 * immediately when segments are out of order (so
 		 * fast retransmit can work).
 		 */
-		if (th->th_seq == tp->rcv_nxt &&
-		    SEGQ_EMPTY(tp) &&
-		    (TCPS_HAVEESTABLISHED(tp->t_state) ||
-		     tfo_syn)) {
-			if (DELAY_ACK(tp, tlen) || tfo_syn)
-				tp->t_flags |= TF_DELACK;
-			else
-				tp->t_flags |= TF_ACKNOW;
-			tp->rcv_nxt += tlen;
-			if (tlen &&
-			    ((tp->t_flags2 & TF2_FBYTES_COMPLETE) == 0) &&
-			    (tp->t_fbyte_in == 0)) {
-				tp->t_fbyte_in = ticks;
-				if (tp->t_fbyte_in == 0)
-					tp->t_fbyte_in = 1;
-				if (tp->t_fbyte_out && tp->t_fbyte_in)
-					tp->t_flags2 |= TF2_FBYTES_COMPLETE;
-			}
-			thflags = th->th_flags & TH_FIN;
+//		if (th->th_seq == tp->rcv_nxt && tp->t_segq == NULL &&
+//		    TCPS_HAVEESTABLISHED(tp->t_state)) {
+//			if (DELAY_ACK(tp, tlen))
+//				tp->t_flags |= TF_DELACK;
+//			else
+//				tp->t_flags |= TF_ACKNOW;
+//			tp->rcv_nxt += tlen;
+//			thflags = th->th_flags & TH_FIN;
+//			TCPSTAT_INC(tcps_rcvpack);
+//			TCPSTAT_ADD(tcps_rcvbyte, tlen);
+//			ND6_HINT(tp);
+//			SOCKBUF_LOCK(&so->so_rcv);
+//			if (so->so_rcv.sb_state & SBS_CANTRCVMORE)
+//				m_freem(m);
+//			else
+//				sbappendstream_locked(&so->so_rcv, m);
+//			/* NB: sorwakeup_locked() does an implicit unlock. */
+//			sorwakeup_locked(so);
+//		} else {
+//			/*
+//			 * XXX: Due to the header drop above "th" is
+//			 * theoretically invalid by now.  Fortunately
+//			 * m_adj() doesn't actually frees any mbufs
+//			 * when trimming from the head.
+//			 */
+//			thflags = tcp_reass(tp, th, &tlen, m);
+//			tp->t_flags |= TF_ACKNOW;
+//		}
+
+        /* XXXNJW: Currently for MPTCP, always insert into the list.
+         * TCP reass checks for TCPS established and queues pre-established
+         * segments that have len.
+         */
+		if (th->th_seq == tp->rcv_nxt && tp->t_segq == NULL &&
+			TCPS_HAVEESTABLISHED(tp->t_state)) {
 			TCPSTAT_INC(tcps_rcvpack);
 			TCPSTAT_ADD(tcps_rcvbyte, tlen);
-			SOCKBUF_LOCK(&so->so_rcv);
-			if (so->so_rcv.sb_state & SBS_CANTRCVMORE)
-				m_freem(m);
-			else
-				sbappendstream_locked(&so->so_rcv, m, 0);
-			tp->t_flags |= TF_WAKESOR;
-		} else {
-			/*
-			 * XXX: Due to the header drop above "th" is
-			 * theoretically invalid by now.  Fortunately
-			 * m_adj() doesn't actually frees any mbufs
-			 * when trimming from the head.
-			 */
-			tcp_seq temp = save_start;
-
-			thflags = tcp_reass(tp, th, &temp, &tlen, m);
+	        if (DELAY_ACK(tp, tlen))
+	            tp->t_flags |= TF_DELACK;
+		    else
+			    tp->t_flags |= TF_ACKNOW;
+		} else /* Out-of-order segment, ACK straight away */
 			tp->t_flags |= TF_ACKNOW;
+
+        /*
+		 * XXX: Due to the header drop above "th" is
+		 * theoretically invalid by now.  Fortunately
+		 * m_adj() doesn't actually frees any mbufs
+		 * when trimming from the head.
+		 */
+//		if (so->so_rcv.sb_state & SBS_CANTRCVMORE) {
+//			m_freem(m);
+//		} else {
+		    if (tlen)
+			    thflags = tcp_reass(tp, th, &tlen, m);
+		    else
+		    	thflags = th->th_flags & TH_FIN;
+//		}
+
+		if (tp->t_segq_received) {
+//			printf("%s: received seg sqn %u\n", __func__, th->th_seq);
+			if (m_ptr == NULL)
+			    m_ptr = tp->t_segq_received;
+			else
+				mp_appendpkt(m_ptr, tp->t_segq_received);
+			tp->t_segq_received = NULL;
 		}
 		if ((tp->t_flags & TF_SACK_PERMIT) &&
 		    (save_tlen > 0) &&
@@ -3304,7 +4164,13 @@ dodata:							/* XXX */
 		 * standard timers.
 		 */
 		case TCPS_FIN_WAIT_2:
+			if (tp->t_sf_state & SFS_MP_ENABLED)
+				mp_wakeup |= MP_SCHEDDETACH;
 			tcp_twstart(tp);
+			if (mp_wakeup)
+				goto mp_input;
+			else
+				mpp_pcbrele_unlocked(mp->mp_mppcb);
 			return;
 		}
 	}
@@ -3329,7 +4195,13 @@ check_delack:
 		tcp_timer_activate(tp, TT_DELACK, tcp_delacktime);
 	}
 	INP_WUNLOCK(tp->t_inpcb);
-	return;
+
+	if (m_ptr || mp_wakeup)
+		goto mp_input;
+	else
+		mpp_pcbrele_unlocked(mp->mp_mppcb);
+
+   return;
 
 dropafterack:
 	/*
@@ -3363,14 +4235,26 @@ dropafterack:
 	(void) tp->t_fb->tfb_tcp_output(tp);
 	INP_WUNLOCK(tp->t_inpcb);
 	m_freem(m);
+	if (m_ptr || mp_wakeup)
+		goto mp_input;
+	else
+		mpp_pcbrele_unlocked(mp->mp_mppcb);
+
 	return;
 
 dropwithreset:
 	if (tp != NULL) {
 		tcp_dropwithreset(m, th, tp, tlen, rstreason);
 		INP_WUNLOCK(tp->t_inpcb);
-	} else
+		/* Further processing at mp-layer */
+		if (m_ptr || mp_wakeup)
+			goto mp_input;
+		else
+			mpp_pcbrele_unlocked(mp->mp_mppcb);
+	} else {
 		tcp_dropwithreset(m, th, NULL, tlen, rstreason);
+		mpp_pcbrele_unlocked(mp->mp_mppcb);
+	}
 	return;
 
 drop:
@@ -3387,6 +4271,46 @@ drop:
 		INP_WUNLOCK(tp->t_inpcb);
 	}
 	m_freem(m);
+
+	/* Further processing at mp-layer */
+	/* Might we want to wakeup even when a tp has been de-alloced? */
+    if (m_ptr || mp_wakeup)
+        goto mp_input;
+    else
+    	mpp_pcbrele_unlocked(mp->mp_mppcb);
+
+    return;
+
+    /* XXXNJW: Kind of a stop-gap way to trigger appropriate tasks
+     * at the MP-layer. To re-think. (Perhaps an mptcp-specific
+     * upcall?) */
+mp_input:
+	MPP_LOCK(mp->mp_mppcb);
+
+	/* If this was the last reference on the mpp, then the session
+	 * has ended and we just return now. (all the data structures
+	 * will have been freed by now). */
+	if (mpp_pcbrele(mp->mp_mppcb)) {
+		printf("%s: freed mpp %p mp %p\n", __func__, mp->mp_mppcb, mp);
+		return;
+	}
+
+	if (m_ptr) {
+	    mp_mbuf_enqueue(mp, m_ptr);
+        mp_wakeup |= MP_SCHEDINPUT;
+	}
+	if ((mp_wakeup & (MP_SCHEDINPUT|MP_SCHEDEVENT|MP_SCHEDJOIN)) != 0)
+	    mp_schedule_tasks(mp, mp_wakeup);
+
+	/* XXNJW: Might have some tasks that can be performed right now.
+	 * this is just a cheap workaround until better monitoring of
+	 * the subflow socket is implemented (say to pick up on
+	 * soisdisconnected and that sort of thing) */
+	if ((mp_wakeup & (MP_SCHEDDETACH | MP_SCHEDCLOSE)) != 0)
+		if (mp_do_task_now(mp, mp_wakeup))
+			return;
+
+	MPP_UNLOCK(mp->mp_mppcb);
 }
 
 /*
@@ -3463,7 +4387,9 @@ void
 tcp_dooptions(struct tcpopt *to, u_char *cp, int cnt, int flags)
 {
 	int opt, optlen;
+	uint8_t subtype;
 
+	to->to_mopts.mpo_flags = 0;
 	to->to_flags = 0;
 	for (; cnt > 0; cnt -= optlen, cp += optlen) {
 		opt = cp[0];
@@ -3507,6 +4433,13 @@ tcp_dooptions(struct tcpopt *to, u_char *cp, int cnt, int flags)
 			bcopy((char *)cp + 6,
 			    (char *)&to->to_tsecr, sizeof(to->to_tsecr));
 			to->to_tsecr = ntohl(to->to_tsecr);
+			break;
+		case TCPOPT_MPTCP:
+			bcopy((char *)cp + 2,
+					(char *)&subtype, sizeof(subtype));
+			if (optlen > MAX_MP_OPLEN)
+				continue;
+			mp_dosubtypes(to, subtype, cp, opt, optlen, flags);
 			break;
 		case TCPOPT_SIGNATURE:
 			/*
@@ -3679,6 +4612,14 @@ tcp_xmit_timer(struct tcpcb *tp, int rtt)
 	 * and the return path might not be symmetrical).
 	 */
 	tp->t_softerror = 0;
+}
+
+static int
+tp_schedule_event(struct tcpcb *tp, int event)
+{
+	tp->t_event_flags |= event;
+    tp->t_event_pending = 1;
+	return MP_SCHEDEVENT;
 }
 
 /*

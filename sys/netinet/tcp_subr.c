@@ -48,16 +48,19 @@ __FBSDID("$FreeBSD$");
 #ifdef TCP_HHOOK
 #include <sys/hhook.h>
 #endif
+#include <sys/kdb.h>
 #include <sys/kernel.h>
 #ifdef TCP_HHOOK
 #include <sys/khelp.h>
 #endif
+#include <sys/limits.h>
 #ifdef KERN_TLS
 #include <sys/ktls.h>
 #endif
 #include <sys/qmath.h>
 #include <sys/stats.h>
 #include <sys/sysctl.h>
+#include <sys/taskqueue.h>
 #include <sys/jail.h>
 #include <sys/malloc.h>
 #include <sys/refcount.h>
@@ -67,6 +70,7 @@ __FBSDID("$FreeBSD$");
 #endif
 #include <sys/priv.h>
 #include <sys/proc.h>
+#include <sys/queue.h>
 #include <sys/sdt.h>
 #include <sys/socket.h>
 #include <sys/socketvar.h>
@@ -113,6 +117,9 @@ __FBSDID("$FreeBSD$");
 #include <netinet6/tcp6_var.h>
 #endif
 #include <netinet/tcpip.h>
+#include <netinet/mptcp_var.h>
+#include <netinet/mptcp_pcb.h>
+#include <crypto/sha1.h>
 #include <netinet/tcp_fastopen.h>
 #ifdef TCPPCAP
 #include <netinet/tcp_pcap.h>
@@ -250,6 +257,12 @@ SYSCTL_PROC(_net_inet_tcp, TCPCTL_V6MSSDFLT, v6mssdflt,
    "Default TCP Maximum Segment Size for IPv6");
 #endif /* INET6 */
 
+VNET_DEFINE(unsigned int, tcp_override_isn) = 0;
+SYSCTL_UINT(_net_inet_tcp, OID_AUTO, override_isn, CTLFLAG_RW,
+    &VNET_NAME(tcp_override_isn), 0,
+    "Manually set the initial sequence number of TCP flows");
+
+
 /*
  * Minimum MSS we accept and use. This prevents DoS attacks where
  * we are forced to a ridiculous low MSS like 20 and send hundreds
@@ -327,6 +340,11 @@ SYSCTL_INT(_net_inet_tcp, OID_AUTO, isn_reseed_interval, CTLFLAG_VNET | CTLFLAG_
 static int	tcp_soreceive_stream;
 SYSCTL_INT(_net_inet_tcp, OID_AUTO, soreceive_stream, CTLFLAG_RDTUN,
     &tcp_soreceive_stream, 0, "Using soreceive_stream for TCP sockets");
+
+VNET_DEFINE(int, tcp_do_mptcp) = 1;
+SYSCTL_INT(_net_inet_tcp, OID_AUTO, mptcp, CTLFLAG_RW,
+    &VNET_NAME(tcp_do_mptcp), 0,
+    "Enable Multipath Support");
 
 VNET_DEFINE(uma_zone_t, sack_hole_zone);
 #define	V_sack_hole_zone		VNET(sack_hole_zone)
@@ -1441,6 +1459,10 @@ tcp_init(void)
 	uma_zone_set_max(V_tcpcb_zone, maxsockets);
 	uma_zone_set_warning(V_tcpcb_zone, "kern.ipc.maxsockets limit reached");
 
+	/* mptcp init */
+	mpp_init();
+	mp_init();
+
 	tcp_tw_init();
 	syncache_init();
 	tcp_hc_init();
@@ -1552,6 +1574,7 @@ tcp_destroy(void *unused __unused)
 	syncache_destroy();
 	tcp_tw_destroy();
 	in_pcbinfo_destroy(&V_tcbinfo);
+	mp_destroy();
 	/* tcp_discardcb() clears the sack_holes up. */
 	uma_zdestroy(V_sack_hole_zone);
 	uma_zdestroy(V_tcpcb_zone);
@@ -2091,6 +2114,10 @@ tcp_newtcpcb(struct inpcb *inp)
 	in_pcbref(inp);	/* Reference for tcpcb */
 	tp->t_inpcb = inp;
 
+	/* dss map queue */
+	TAILQ_INIT(&tp->t_send_maps.dsmap_list);
+	TAILQ_INIT(&tp->t_rcv_maps.dsmap_list);
+
 	if (CC_ALGO(tp)->cb_init != NULL)
 		if (CC_ALGO(tp)->cb_init(tp->ccv) > 0) {
 			if (tp->t_fb->tfb_tcp_fb_fini)
@@ -2180,6 +2207,35 @@ tcp_newtcpcb(struct inpcb *inp)
 		tp->t_stats = stats_blob_alloc(V_tcp_perconn_stats_dflt_tpl, 0);
 #endif
 	return (tp);		/* XXX */
+}
+
+
+/* The mappings always start from beginning of the send buffer, and the
+ * maps are placed into the list in sequence order. */
+void
+dsmap_drop(struct dsmapq_head *dsmap_list, tcp_seq th_ack, int len)
+{
+	struct ds_map *map;
+
+    map = TAILQ_FIRST(dsmap_list);
+    while (len > 0) {
+    	KASSERT(map != NULL, ("%s: no send map, len %d", __func__, len));
+    	KASSERT(map->ds_map_remain >= len || TAILQ_NEXT(map, sf_ds_map_next),
+    	        ("%s: drop len %d greater than mapped bytes\n", __func__, len));
+
+		if (map->ds_map_remain > len) {
+			map->ds_map_remain -= len;
+			//map->sf_seq_start = th_ack;
+			break;
+		}
+		len -= map->ds_map_remain;
+
+		struct ds_map *n;
+		n = TAILQ_NEXT(map, sf_ds_map_next);
+		TAILQ_REMOVE(dsmap_list, map, sf_ds_map_next);
+		free(map, M_DSSMAP);
+		map = n;
+	}
 }
 
 /*
@@ -2317,8 +2373,21 @@ tcp_discardcb(struct tcpcb *tp)
 		tp->t_fb->tfb_tcp_timer_stop_all(tp);
 	}
 
-	/* free the reassembly queue, if any */
+	/* free the reassembly queue, if any
++	 * XXXNJW: If a subflow has called into tcp_discard, could we still need
++	 * to retain the segments, in cases where there is some disorder and these
++	 * segments will be needed to reassemble later? */
 	tcp_reass_flush(tp);
+
+	/* free ds_maps from t_rxmaps */
+	struct ds_map *n1, *n2;
+	n1 = TAILQ_FIRST(&tp->t_rcv_maps.dsmap_list);
+    while (n1 != NULL) {
+            n2 = TAILQ_NEXT(n1, sf_ds_map_next);
+            free(n1, M_DSSMAP);
+            n1 = n2;
+    }
+
 
 #ifdef TCP_OFFLOAD
 	/* Disconnect offload device, if any. */

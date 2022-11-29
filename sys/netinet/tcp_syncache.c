@@ -45,6 +45,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/hash.h>
 #include <sys/refcount.h>
 #include <sys/kernel.h>
+#include <sys/endian.h>
 #include <sys/sysctl.h>
 #include <sys/limits.h>
 #include <sys/lock.h>
@@ -57,6 +58,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/socketvar.h>
 #include <sys/syslog.h>
 #include <sys/ucred.h>
+#include <sys/queue.h>
 
 #include <sys/md5.h>
 #include <crypto/siphash/siphash.h>
@@ -90,6 +92,9 @@ __FBSDID("$FreeBSD$");
 #include <netinet/tcp_timer.h>
 #include <netinet/tcp_var.h>
 #include <netinet/tcp_syncache.h>
+#include <netinet/mptcp.h>
+#include <netinet/mptcp_var.h>
+#include <netinet/mptcp_pcb.h>
 #ifdef INET6
 #include <netinet6/tcp6_var.h>
 #endif
@@ -226,6 +231,9 @@ static MALLOC_DEFINE(M_SYNCACHE, "syncache", "TCP syncache");
 #define	SCH_LOCK(sch)		mtx_lock(&(sch)->sch_mtx)
 #define	SCH_UNLOCK(sch)		mtx_unlock(&(sch)->sch_mtx)
 #define	SCH_LOCK_ASSERT(sch)	mtx_assert(&(sch)->sch_mtx, MA_OWNED)
+
+#define lsototcpcb(lso) intotcpcb(((struct mpcb *)mpptompcb((struct mppcb *) \
+     sotomppcb(lso)))->m_cb_ref.inp)
 
 /*
  * Requires the syncache entry to be already removed from the bucket list.
@@ -793,6 +801,9 @@ syncache_socket(struct syncache *sc, struct socket *lso, struct mbuf *m)
 	struct tcpcb *tp;
 	int error;
 	char *s;
+	struct mppcb *mpp;
+	struct mpcb *mp;
+    struct socket *sf_so = NULL;
 
 	NET_EPOCH_ASSERT();
 
@@ -801,6 +812,10 @@ syncache_socket(struct syncache *sc, struct socket *lso, struct mbuf *m)
 	 * as they would have been set up if we had created the
 	 * connection when the SYN arrived.  If we can't create
 	 * the connection, abort it.
+	 *
+	 * XXXNJW: Calling sonewconn should be done with the MPP lock held. At this
+	 * a usrreq might be called that tries to manipulate the socket or the MPP
+	 * in some way.
 	 */
 	so = sonewconn(lso, 0);
 	if (so == NULL) {
@@ -818,6 +833,74 @@ syncache_socket(struct syncache *sc, struct socket *lso, struct mbuf *m)
 		}
 		goto abort2;
 	}
+
+	// at this point so is a duplicate of the listen socket. need to duplicate
+	// the mpcb fields from syncache mptcp fields to the new mpcb
+    // causes a bunch of witness LOR warnings, but shouldn't be a problem as
+	// the mpp and mp are held under the INP_WLOCK of an inp attached to a
+	// different mpcb
+
+	// should put the mppcb socket into "acceptconn" state, so that when the
+	// subflow triggers a "subflow_connected" event (on return to
+	// tcp_input), the mppcb socket also calls soisconencted in response,
+	// which leads to a wakeup of head->so_timeo, and the mppcb socket being
+	// dequeued from so_comp and "accept" being called on the mppcb socket.
+	// at this point the fd for the newly created mppcb socket will be
+	// returned to the process, and the process can start writing/receiving
+	// data on the new (MPTCP) socket.
+
+	// The following creates a LOR with the INP_INFO_WLOCK. Will need to do
+	// some un-locking/re-locking to make sure that the ordering is correct
+	// (TODO).
+
+	mpp = sotomppcb(so);
+	MPP_LOCK(mpp);
+    mp = mpptompcb(mpp);
+
+    /* Copy sequence numbers from the syncache. These are over-ridden
+     * if the connection transitions into MP */
+    //    mp_syncache_newmpcb(mp, sc);
+    mp->ds_rcv_nxt = sc->sc_irs + 1;
+    mp->ds_snd_una = mp->ds_map_max = mp->ds_map_min = mp->ds_snd_nxt =
+        sc->sc_iss + 1;
+    mp->mp_passive = 1;
+
+    /* create a socket for a new subflow */
+    error = mp_create_subflow_socket(so, &sf_so);
+	if (error) {
+		MPP_UNLOCK(mpp);
+		goto abort2;
+	}
+	KASSERT(sf_so != NULL, ("%s: subflow socket NULL", __func__));
+
+	/* Must mark the primary socket as connecting while waiting for the subflow
+	 * socket to reach connected and trigger a connected event. the primary
+     * socket will then call soisconnected and alloc a new fd for the process
+     * to use. */
+    if (!error)
+    	soisconnecting(so);
+
+    /* If an MP_CAPABLE exchange was made, enable MPTCP now. */
+//    if (sc->sc_mp_flags & MPF_MP_CAPABLE_ACK) {
+//    	sc->sc_mp_flags &= ~MPF_MP_CAPABLE_ACK;
+//    	soisconnected(so);
+//    	mp_init_established(mp);
+//    }
+
+	/* attach a tcpcb and inpcb to the subflow socket */
+	error = mp_attach_subflow(sf_so);
+
+	/* Insert the new sufblow pcbs and gso into sf_list */
+	error = mp_insert_subflow(mp, sf_so);
+
+    MPP_UNLOCK(mpp);
+
+	if (error)
+		goto abort2;
+
+    /* from here on work with the subflow socket */
+    so = sf_so;
+
 #ifdef MAC
 	mac_socketpeer_set_from_mbuf(m, so);
 #endif
@@ -1000,8 +1083,19 @@ syncache_socket(struct syncache *sc, struct socket *lso, struct mbuf *m)
 	tp->rcv_adv += tp->rcv_wnd;
 	tp->last_ack_sent = tp->rcv_nxt;
 
-	tp->t_flags = sototcpcb(lso)->t_flags & (TF_NOPUSH|TF_NODELAY);
-	if (sc->sc_flags & SCF_NOOPT)
+	/* Will be copied to mpcb when mp_init_establish is called */
+	if (sc->sc_mp_flags & MPF_MP_CAPABLE_ACK) {
+		sc->sc_mp_flags &= ~MPF_MP_CAPABLE_ACK;
+		tp->t_mp_conn.local_key = sc->sc_local_key;
+		tp->t_mp_conn.remote_key = sc->sc_remote_key;
+		tp->t_mp_conn.local_token = sc->sc_mp_local_token;
+		tp->t_mp_conn.remote_token = sc->sc_mp_remote_token;
+		tp->t_mp_conn.ds_idss = sc->sc_ds_iss;
+		tp->t_mp_conn.ds_idrs = sc->sc_ds_irs;
+	}
+
+	tp->t_flags = lsototcpcb(lso)->t_flags & (TF_NOPUSH|TF_NODELAY);
+	if (sc->sc_flags & SCF_NOOPT) {
 		tp->t_flags |= TF_NOOPT;
 	else {
 		if (sc->sc_flags & SCF_WINSCALE) {
@@ -1055,10 +1149,10 @@ syncache_socket(struct syncache *sc, struct socket *lso, struct mbuf *m)
 	/*
 	 * Copy and activate timers.
 	 */
-	tp->t_keepinit = sototcpcb(lso)->t_keepinit;
-	tp->t_keepidle = sototcpcb(lso)->t_keepidle;
-	tp->t_keepintvl = sototcpcb(lso)->t_keepintvl;
-	tp->t_keepcnt = sototcpcb(lso)->t_keepcnt;
+	tp->t_keepinit = lsototcpcb(lso)->t_keepinit;
+	tp->t_keepidle = lsototcpcb(lso)->t_keepidle;
+	tp->t_keepintvl = lsototcpcb(lso)->t_keepintvl;
+	tp->t_keepcnt = lsototcpcb(lso)->t_keepcnt;
 	tcp_timer_activate(tp, TT_KEEP, TP_KEEPINIT(tp));
 
 	TCPSTAT_INC(tcps_accepts);
@@ -1324,6 +1418,9 @@ syncache_expand(struct in_conninfo *inc, struct tcpopt *to, struct tcphdr *th,
 		goto failed;
 	}
 
+	if (to->to_mopts.mpo_flags & MPOF_CAPABLE_ACK)
+		sc->sc_mp_flags |= MPF_MP_CAPABLE_ACK;
+
 	*lsop = syncache_socket(sc, *lsop, m);
 
 	if (*lsop == NULL)
@@ -1429,7 +1526,7 @@ syncache_add(struct in_conninfo *inc, struct tcpopt *to, struct tcphdr *th,
 	 */
 	so = *lsop;
 	KASSERT(SOLISTENING(so), ("%s: %p not listening", __func__, so));
-	tp = sototcpcb(so);
+	tp = lsototcpcb(so);
 	cred = crhold(so->so_cred);
 
 #ifdef INET6
@@ -1736,6 +1833,26 @@ skip_alloc:
 	if (to->to_flags & TOF_SIGNATURE)
 		sc->sc_flags |= SCF_SIGNATURE;
 #endif	/* TCP_SIGNATURE */
+
+	/* Set to 1 if we send an MP_CAPABLE option */
+	sc->sent_capable = 0;
+
+	/*
+	 * MP SYN packets are either the start of a new connection
+	 * (MP_CAPABLE) or the addition of a subflow to an existing
+	 * connection (MP_JOIN).
+	 */
+	if (to->to_flags & TOF_MPTCP) {
+		if(to->to_mopts.mpo_flags & MPOF_MP_CAPABLE) {
+			sc->sc_flags |= SCF_MPTCP;
+			sc->sc_mp_flags |= MPF_MP_CAPABLE;
+			mp_syncache_process_remote_key(sc, to->to_mopts.remote_key);
+			mp_syncache_process_local_key(sc);
+			if (to->to_mopts.mpo_flags & MPOF_USE_CSUM)
+				sc->csum_enabled = 1;
+		} /* removed an else-if for MP_JOINs */
+	}
+
 	if (to->to_flags & TOF_SACKPERM)
 		sc->sc_flags |= SCF_SACK;
 	if (to->to_flags & TOF_MSS)
@@ -1749,7 +1866,7 @@ skip_alloc:
 	if (V_tcp_syncookies)
 		sc->sc_iss = syncookie_generate(sch, sc);
 	else
-		sc->sc_iss = arc4random();
+		sc->sc_iss = V_tcp_override_isn > 0 ? V_tcp_override_isn : arc4random();
 #ifdef INET6
 	if (autoflowlabel) {
 		if (V_tcp_syncookies)
@@ -1960,6 +2077,19 @@ syncache_respond(struct syncache *sc, const struct mbuf *m0, int flags)
 				to.to_wscale = sc->sc_requested_r_scale;
 				to.to_flags |= TOF_SCALE;
 			}
+			if(sc->sc_flags & SCF_MPTCP) {
+				to.to_mopts.mpo_flags = 0;
+				/* Got a SYN with MP_CAPABLE, so send MP_CAPABLE back */
+				if(sc->sc_mp_flags & MPF_MP_CAPABLE) {
+					to.to_flags |= TOF_MPTCP;
+					to.to_mopts.mpo_flags |=
+							MPOF_CAPABLE_SYN;
+					to.to_mopts.local_key = sc->sc_local_key;
+
+					if (sc->csum_enabled)
+						to.to_mopts.mpo_flags |= MPOF_USE_CSUM;
+				}
+			}
 			if (sc->sc_flags & SCF_SACK)
 				to.to_flags |= TOF_SACKPERM;
 #if defined(IPSEC_SUPPORT) || defined(TCP_SIGNATURE)
@@ -1979,7 +2109,15 @@ syncache_respond(struct syncache *sc, const struct mbuf *m0, int flags)
 			to.to_tsecr = sc->sc_tsreflect;
 			to.to_flags |= TOF_TS;
 		}
+		uint64_t mpof_flags = to.to_mopts.mpo_flags;
 		optlen = tcp_addoptions(&to, (u_char *)(th + 1));
+
+		/* If mp_capable was set and is now unset, then it has
+		 * been added as an option on the outgoing SYN/ACK */
+		if ((mpof_flags & MPOF_CAPABLE_SYN) &&
+		    (!to.to_mopts.mpo_flags & MPOF_CAPABLE_SYN))
+			sc->sent_capable = 1;
+
 
 		/* Adjust headers by option size. */
 		th->th_off = (sizeof(struct tcphdr) + optlen) >> 2;
@@ -2595,4 +2733,31 @@ syncache_pcblist(struct sysctl_req *req)
 	}
 
 	return (0);
+}
+
+
+/* Find inp matching addresses and return locked */
+static inline struct inpcb*
+inp_lookup(struct in_addr *faddr, struct in_addr *laddr, uint16_t fport,
+    uint16_t lport) {
+	struct inpcb *inp = NULL;
+	struct tcpcb *tp = NULL;
+
+	INP_INFO_LOCK_ASSERT(&V_tcbinfo);
+	LIST_FOREACH(inp, &V_tcb, inp_list) {
+		INP_WLOCK(inp);
+		/* Important to skip tcptw structs. */
+		if (!(inp->inp_flags & INP_TIMEWAIT) &&
+			(tp = intotcpcb(inp)) != NULL) {
+				if (inp->inp_faddr.s_addr == faddr->s_addr &&
+					inp->inp_laddr.s_addr == laddr->s_addr &&
+					inp->inp_fport == fport &&
+					inp->inp_lport == lport) {
+					break;
+				}
+		}
+		INP_WUNLOCK(inp);
+	}
+
+	return(inp);
 }

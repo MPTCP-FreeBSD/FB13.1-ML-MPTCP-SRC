@@ -128,7 +128,7 @@ SYSCTL_INT(_net_inet_tcp_mptcp, OID_AUTO, mptimerlength,
     "MPTCP timeout interval length");
 
 
-static VNET_DEFINE(uma_zone_t, mpcb_zone);
+VNET_DEFINE_STATIC(uma_zone_t, mpcb_zone);
 #define	V_mpcb_zone			VNET(mpcb_zone)
 
 //static VNET_DEFINE(uma_zone_t, mpsopt_zone);

@@ -176,7 +176,7 @@ mp_usr_connect(struct socket *so, struct sockaddr *nam, struct thread *td)
     	goto out;
 
     /* Initiate a connection from the new subflow socket. */
-	error = (*(sf_so)->so_proto->pr_usrreqs->pru_connect)(sf_so, nam, td);
+    error = (*(sf_so)->so_proto->pr_usrreqs->pru_connect)(sf_so, nam, td);
 
 	/* XXXNJW: a temporary way to store the default ports used
 	 * in this connection. */

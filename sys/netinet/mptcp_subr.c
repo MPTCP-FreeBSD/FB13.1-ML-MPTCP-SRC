@@ -3237,7 +3237,7 @@ mp_create_subflow_implicit(struct mpcb *mp, struct socket *so, struct ip *ip,
 
     soisconnecting(sf_so);
 	tp->t_sf_flags |= SFF_PASSIVE_JOIN;
-	tp->iss = tcp_new_isn(tp);
+	tp->iss = tcp_new_isn(&inp->inp_inc);
     tp->irs = th->th_seq;
     tp->t_mp_conn.local_key = mp->local_key;
     tp->t_mp_conn.remote_key = mp->remote_key;

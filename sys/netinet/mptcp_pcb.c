@@ -68,7 +68,7 @@
 #include <netinet/mptcp_var.h>
 #include <netinet/mptcp_dtrace_define.h>
 
-static VNET_DEFINE(uma_zone_t, mppcb_zone);
+VNET_DEFINE_STATIC(uma_zone_t, mppcb_zone);
 #define	V_mppcb_zone			VNET(mppcb_zone)
 
 /*

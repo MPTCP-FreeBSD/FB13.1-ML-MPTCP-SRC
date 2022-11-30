@@ -297,7 +297,7 @@ mp_addresses(SYSCTL_HANDLER_ARGS)
 		sbuf_delete(s);
 	} else {
 		i = 1;
-		while ((straddr = strsep((char **)&req->newptr, " "))
+		while ((straddr = strsep((const char **)&req->newptr, " "))
 			!= NULL && i < MAX_ADDRS && !error) {
 			ret = inet_pton(AF_INET6, straddr,
 			    &((struct sockaddr_in6 *)&mp_usable_addresses[i])->sin6_addr);
@@ -364,7 +364,7 @@ mp_debug_sysctl_handler(SYSCTL_HANDLER_ARGS)
 	} else {
 		char *class, *pair;
 
-		while ((pair = strsep(((char **)&req->newptr), ",")) != NULL) {
+		while ((pair = strsep(((const char **)&req->newptr), ",")) != NULL) {
 			class = strsep(&pair, ":");
 			for(i = 0; i < N_DEBUGCLASSES; i++) {
 				if (strcmp(class, debug_classes[i].class) == 0

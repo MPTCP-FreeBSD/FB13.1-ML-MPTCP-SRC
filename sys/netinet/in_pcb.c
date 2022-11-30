@@ -652,8 +652,8 @@ out:
  * Allocate a PCB and associate it with the socket.
  * On success return with the PCB locked.
  */
-int
-in_pcballoc(struct socket *so, struct inpcbinfo *pcbinfo)
+struct inpcb *
+in_pcballoc_subflow(struct socket *so, struct inpcbinfo *pcbinfo)
 {
 	struct inpcb *inp;
 	int error;
@@ -714,7 +714,7 @@ out:
 	if (error != 0) {
 		crfree(inp->inp_cred);
 		uma_zfree(pcbinfo->ipi_zone, inp);
-		inp == NULL;
+		inp = NULL;
 	}
 #endif
 	return (inp);

@@ -132,7 +132,6 @@ mp_timer_rexmt(void * xmp)
 
     /* XXXNJW should be concerned about races with discard? */
 	if (mp == NULL) {
-		CURVNET_RESTORE();
 		return;
 	}
 
@@ -175,7 +174,6 @@ mp_timer_rexmt(void * xmp)
 
 out:
     MPP_UNLOCK(mpp);
-	CURVNET_RESTORE();
 }
 
 
@@ -193,7 +191,6 @@ mp_timer_timeout(void * xmp)
 
     /* XXXNJW should be concerned about races with discard? */
     if (mp == NULL) {
-		CURVNET_RESTORE();
 		return;
 	}
 
@@ -245,5 +242,4 @@ mp_timer_timeout(void * xmp)
 out:
     if (mp != NULL)
 	    MPP_UNLOCK(mpp);
-	CURVNET_RESTORE();
 }

@@ -3138,8 +3138,8 @@ mp_allocghostsocket(struct socket *so) {
 	if (sf_gso == NULL)
 		return (NULL);
 
-	knlist_init_mtx(&sf_gso->so_rcv.sb_sel.si_note, SOCKBUF_MTX(&sf_gso->so_rcv));
-	knlist_init_mtx(&sf_gso->so_snd.sb_sel.si_note, SOCKBUF_MTX(&sf_gso->so_snd));
+	knlist_init_mtx(&sf_gso->so_rcv.sb_sel->si_note, SOCKBUF_MTX(&sf_gso->so_rcv));
+	knlist_init_mtx(&sf_gso->so_snd.sb_sel->si_note, SOCKBUF_MTX(&sf_gso->so_snd));
 
 	/* Inherit state from the connection socket (though don't set so_head) */
 	sf_gso->so_head = NULL;

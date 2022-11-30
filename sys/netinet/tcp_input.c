@@ -2654,7 +2654,8 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 				 * appending segments at the data-level.
 				 */
                 m_adj(m, drop_hdrlen);	/* delayed header drop */
-				thflags = tcp_reass(tp, th, &tlen, m);
+				tcp_seq temp = th->th_seq;
+				thflags = tcp_reass(tp, th, &temp, &tlen, m);
 
 				/* is there any new in-order data? */
 				if (tp->t_segq_received) {
@@ -4053,7 +4054,8 @@ dodata:							/* XXX */
 //			m_freem(m);
 //		} else {
 		    if (tlen)
-			    thflags = tcp_reass(tp, th, &tlen, m);
+				tcp_seq temp = save_start;
+			    thflags = tcp_reass(tp, th, &temp, &tlen, m);
 		    else
 		    	thflags = th->th_flags & TH_FIN;
 //		}

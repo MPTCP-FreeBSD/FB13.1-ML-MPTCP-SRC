@@ -113,9 +113,6 @@ mp_usr_attach(struct socket *so, int proto, struct thread *td)
     if (error)
         goto out;
 
-    if ((so->so_options & SO_LINGER) && so->so_linger == 0)
-		so->so_linger = TCP_LINGERTIME;
-
     /* XXXNJW: temp subflow protosw for testing */
     sf_protosw = *so->so_proto;
     sf_protosw.pr_usrreqs = &tcp_usrreqs;

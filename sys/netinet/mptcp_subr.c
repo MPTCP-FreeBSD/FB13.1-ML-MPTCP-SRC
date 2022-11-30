@@ -3545,9 +3545,6 @@ mp_alloc_subflow_socket(struct socket *so, struct socket **gso)
 		goto out;
     }
 
-	if ((sf_gso->so_options & SO_LINGER) && sf_gso->so_linger == 0)
-		sf_gso->so_linger = TCP_LINGERTIME;
-
 	*gso = sf_gso;
 
 out:

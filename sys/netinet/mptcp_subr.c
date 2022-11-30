@@ -1448,7 +1448,7 @@ mp_do_output(struct socket *so, struct mpcb *mp, struct sf_handle *sf,
 		 * Start the m_copym function from the closest mbuf
 		 * to the offset in the socket buffer chain.
 		 */
-		mb = sbsndptr(&so->so_snd, off, map_length, &moff);
+		mb = sbsndptr_noadv(&so->so_snd, off, &moff);
 
 		/* copy the mapped data from the data-level send buffer to a new mbuf
 		 * chain */

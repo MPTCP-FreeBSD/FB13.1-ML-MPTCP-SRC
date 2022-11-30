@@ -216,7 +216,6 @@ mp_timer_timeout(void * xmp)
 			if (mpp->mpp_flags & MPP_SOCKREF) {
 				mpp->mpp_flags &= ~MPP_SOCKREF;
 				MPP_UNLOCK(mpp);
-				ACCEPT_LOCK();
 				SOCK_LOCK(so);
 				KASSERT(so->so_state & SS_PROTOREF,
 					("tcp_twclose: INP_SOCKREF && !SS_PROTOREF"));

@@ -2886,7 +2886,6 @@ mp_close(struct mpcb *mp)
 		    ("mp_close: !SS_PROTOREF"));
 		mpp->mpp_flags &= ~MPP_SOCKREF;
 		MPP_UNLOCK(mpp);
-		ACCEPT_LOCK();
 		SOCK_LOCK(so);
 		so->so_state &= ~SS_PROTOREF;
 		printf("%s: call sofree\n", __func__);
@@ -2919,7 +2918,6 @@ mp_close_all_subflows(struct mpcb *mp)
 		    error = sodisconnect(sf_h->sf_so);
             if (error == 0) {
             	(*so->so_proto->pr_usrreqs->pru_close)(sf_h->sf_so);
-            	ACCEPT_LOCK();
             	SOCK_LOCK(sf_h->sf_so);
             	sorele(sf_h->sf_so);
             }
@@ -2995,7 +2993,6 @@ mp_subflow_freehandle(struct mpcb *mp, struct sf_handle *sf)
 void
 mp_subflow_release_socket(struct socket *so)
 {
-	ACCEPT_LOCK();
 	SOCK_LOCK(so);
 	sorele(so);
 }

@@ -778,7 +778,7 @@ mp_usr_accept(struct socket *so, struct sockaddr **nam)
 	KASSERT(mpp != NULL, ("%s: mpp == NULL", __func__));
 	MPP_LOCK(mpp);
 
-	INP_INFO_RLOCK(&V_tcbinfo);
+	INP_INFO_WLOCK(&V_tcbinfo);
 
 	mp = mpptompcb(mpp);
 	KASSERT(mp != NULL, ("%s: mp == NULL", __func__));
@@ -805,7 +805,7 @@ mp_usr_accept(struct socket *so, struct sockaddr **nam)
 
 out:
 	INP_WUNLOCK(inp);
-	INP_INFO_RUNLOCK(&V_tcbinfo);
+	INP_INFO_WUNLOCK(&V_tcbinfo);
 	MPP_UNLOCK(mpp);
 
 	if (error == 0)

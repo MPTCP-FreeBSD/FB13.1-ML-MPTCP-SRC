@@ -64,7 +64,7 @@ __FBSDID("$FreeBSD$");
 #include <net/route.h>
 #include <net/vnet.h>
 
-#include <netinet/cc.h>
+#include <netinet/cc/cc.h>
 #include <netinet/in.h>
 #include <netinet/in_pcb.h>
 #include <netinet/in_systm.h>

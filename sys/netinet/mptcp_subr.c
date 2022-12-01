@@ -297,7 +297,7 @@ mp_addresses(SYSCTL_HANDLER_ARGS)
 		sbuf_delete(s);
 	} else {
 		i = 1;
-		char *temp = strdup((const char *)(req->newptr))
+		char *temp = (char *)(unsigned long)(req->newptr);	// remove const qualifier and cast to char*
 		while ((straddr = strsep(&temp, " "))
 			!= NULL && i < MAX_ADDRS && !error) {
 			ret = inet_pton(AF_INET6, straddr,
@@ -364,7 +364,7 @@ mp_debug_sysctl_handler(SYSCTL_HANDLER_ARGS)
 		sbuf_delete(s);
 	} else {
 		char *class, *pair;
-		char *temp = strdup((const char *)(req->newptr))
+		char *temp = (char *)(unsigned long)(req->newptr);	// remove const qualifier and cast to char*
 		while ((pair = strsep(&temp, ",")) != NULL) {
 			class = strsep(&pair, ":");
 			for(i = 0; i < N_DEBUGCLASSES; i++) {

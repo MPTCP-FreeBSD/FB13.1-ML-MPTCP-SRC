@@ -1097,6 +1097,7 @@ syncache_socket(struct syncache *sc, struct socket *lso, struct mbuf *m)
 	tp->t_flags = lsototcpcb(lso)->t_flags & (TF_NOPUSH|TF_NODELAY);
 	if (sc->sc_flags & SCF_NOOPT) {
 		tp->t_flags |= TF_NOOPT;
+	}
 	else {
 		if (sc->sc_flags & SCF_WINSCALE) {
 			tp->t_flags |= TF_REQ_SCALE|TF_RCVD_SCALE;

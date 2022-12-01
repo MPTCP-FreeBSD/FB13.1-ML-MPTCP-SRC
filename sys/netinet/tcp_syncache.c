@@ -2116,7 +2116,7 @@ syncache_respond(struct syncache *sc, const struct mbuf *m0, int flags)
 		/* If mp_capable was set and is now unset, then it has
 		 * been added as an option on the outgoing SYN/ACK */
 		if ((mpof_flags & MPOF_CAPABLE_SYN) &&
-		    (!to.to_mopts.mpo_flags & MPOF_CAPABLE_SYN))
+		    !(to.to_mopts.mpo_flags & MPOF_CAPABLE_SYN))
 			sc->sent_capable = 1;
 
 

@@ -4027,7 +4027,7 @@ dodata:							/* XXX */
          * TCP reass checks for TCPS established and queues pre-established
          * segments that have len.
          */
-		if (th->th_seq == tp->rcv_nxt && tp->t_segq == NULL &&
+		if (th->th_seq == tp->rcv_nxt && &tp->t_segq == NULL &&
 			TCPS_HAVEESTABLISHED(tp->t_state)) {
 			TCPSTAT_INC(tcps_rcvpack);
 			TCPSTAT_ADD(tcps_rcvbyte, tlen);

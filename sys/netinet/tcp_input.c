@@ -1220,7 +1220,7 @@ findpcb:
 			 * the mbuf chain and unlocks the inpcb.
 			 */
 			tcp_do_segment(m, th, so, tp, drop_hdrlen, tlen, iptos);
-			INP_INFO_UNLOCK_ASSERT(&V_tcbinfo);
+			INP_INFO_WUNLOCK_ASSERT(&V_tcbinfo);
 			return (IPPROTO_DONE);
 
 		}
@@ -1339,7 +1339,7 @@ findpcb:
             	printf("%s: error %d\n", __func__, error);
 
 			INP_INFO_WUNLOCK(&V_tcbinfo);
-			INP_INFO_UNLOCK_ASSERT(&V_tcbinfo);
+			INP_INFO_WUNLOCK_ASSERT(&V_tcbinfo);
 			return (IPPROTO_DONE);
 		}
 

@@ -571,7 +571,6 @@ int
 tcp_output(struct tcpcb *tp)
 {
 	struct socket *so = tp->t_inpcb->inp_socket;
-	struct mpcb *mp = tp->t_mpcb;
 	int32_t len;
 	uint32_t recwin, sendwin;
 	int off = 0, flags, map_offset = 0, error = 0;	/* Keep compiler happy */
@@ -614,7 +613,7 @@ tcp_output(struct tcpcb *tp)
 
 	NET_EPOCH_ASSERT();
 	INP_WLOCK_ASSERT(tp->t_inpcb);
-	KASSERT(mp != NULL, ("%s: mp NULL", __func__));
+	KASSERT(tp->t_mpcb != NULL, ("%s: tp->t_mpcb NULL", __func__));
 
 #ifdef TCP_OFFLOAD
 	if (tp->t_flags & TF_TOE)

@@ -2745,7 +2745,7 @@ inp_lookup(struct in_addr *faddr, struct in_addr *laddr, uint16_t fport,
 	struct tcpcb *tp = NULL;
 
 	INP_INFO_LOCK_ASSERT(&V_tcbinfo);
-	LIST_FOREACH(inp, &V_tcb, inp_list) {
+	CK_LIST_FOREACH(inp, &V_tcb, inp_list) {
 		INP_WLOCK(inp);
 		/* Important to skip tcptw structs. */
 		if (!(inp->inp_flags & INP_TIMEWAIT) &&

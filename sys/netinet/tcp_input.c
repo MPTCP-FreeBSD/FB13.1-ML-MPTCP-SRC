@@ -4047,9 +4047,10 @@ dodata:							/* XXX */
 //		if (so->so_rcv.sb_state & SBS_CANTRCVMORE) {
 //			m_freem(m);
 //		} else {
-		    if (tlen)
+		    if (tlen) {
 				tcp_seq temp = save_start;
 			    thflags = tcp_reass(tp, th, &temp, &tlen, m);
+			}
 		    else
 		    	thflags = th->th_flags & TH_FIN;
 //		}

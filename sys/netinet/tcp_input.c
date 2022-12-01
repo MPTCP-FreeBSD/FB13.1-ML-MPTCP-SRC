@@ -3983,7 +3983,6 @@ dodata:							/* XXX */
 			    __LINE__, tp);
  		/*
 		 * XXXNJW: Need to adapt this comment
-		/*
 		 * Insert segment which includes th into TCP reassembly queue
 		 * with control block tp.  Set thflags to whether reassembly now
 		 * includes a segment with FIN.  This handles the common case

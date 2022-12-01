@@ -2536,7 +2536,7 @@ unhold:
 #undef INP_WLOCK_RECHECK_CLEANUP
 
 int
-tcp_attach(struct socket *so, int proto, struct thread *td)
+tcp_attach(struct socket *so)
 {
 	struct inpcb *inp;
 	struct tcpcb *tp = NULL;

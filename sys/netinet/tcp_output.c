@@ -1408,7 +1408,7 @@ send:
 						(uint32_t) snd_dsmap->ds_map_start + map_offset;
 					//to.to_mopts.dss_data_len = len;
 					if (to.to_mopts.data_seq_num == 0) {
-						printf("%s: dsn is 0 len %ld tsqn %u\n", __func__,
+						printf("%s: dsn is 0 len %d tsqn %u\n", __func__,
 						    len, tp->snd_nxt);
 					}
 
@@ -1618,7 +1618,7 @@ send:
 		if (len) {
 	        unsent = snd_dsmap->ds_map_len - map_offset;
 			if(unsent == 0) {
-				printf("%s: len %ld unsent %ld, ds_map_len %d\n",
+				printf("%s: len %d unsent %ld, ds_map_len %d\n",
 				    __func__, len, unsent, (uint32_t) snd_dsmap->ds_map_len);
 				kdb_break();
 			}

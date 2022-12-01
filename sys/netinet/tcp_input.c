@@ -1219,8 +1219,7 @@ findpcb:
 			 * contains.  tcp_do_segment() consumes
 			 * the mbuf chain and unlocks the inpcb.
 			 */
-			tcp_do_segment(m, th, so, tp, drop_hdrlen, tlen,
-				iptos, ti_locked);
+			tcp_do_segment(m, th, so, tp, drop_hdrlen, tlen, iptos);
 			INP_INFO_UNLOCK_ASSERT(&V_tcbinfo);
 			return (IPPROTO_DONE);
 
@@ -1339,10 +1338,7 @@ findpcb:
             if (error)
             	printf("%s: error %d\n", __func__, error);
 
-			if (ti_locked == TI_WLOCKED) {
-				INP_INFO_WUNLOCK(&V_tcbinfo);
-				ti_locked = TI_UNLOCKED;
-			}
+			INP_INFO_WUNLOCK(&V_tcbinfo);
 			INP_INFO_UNLOCK_ASSERT(&V_tcbinfo);
 			return (IPPROTO_DONE);
 		}

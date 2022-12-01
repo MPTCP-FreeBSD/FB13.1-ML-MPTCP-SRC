@@ -888,7 +888,7 @@ syncache_socket(struct syncache *sc, struct socket *lso, struct mbuf *m)
 //    }
 
 	/* attach a tcpcb and inpcb to the subflow socket */
-	error = mp_attach_subflow(sf_so);
+    error = mp_attach_subflow(sf_so);
 
 	/* Insert the new sufblow pcbs and gso into sf_list */
 	error = mp_insert_subflow(mp, sf_so);

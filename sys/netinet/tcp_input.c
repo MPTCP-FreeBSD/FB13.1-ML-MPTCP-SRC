@@ -1310,12 +1310,11 @@ findpcb:
 
             if (to.to_flags & TOF_MSS)
             	tcp_mss(tp, to.to_mss);
-        	if ((tp->t_flags & TF_SACK_PERMIT) &&
-        	    (to.to_flags & TOF_SACKPERM) == 0)
-        		tp->t_flags &= ~TF_SACK_PERMIT;
+            if ((tp->t_flags & TF_SACK_PERMIT) && (to.to_flags & TOF_SACKPERM) == 0)
+            	tp->t_flags &= ~TF_SACK_PERMIT;
 
-			if (!(to.to_flags & TOF_SACK))
-				tp->t_flags &= ~TF_SACK_PERMIT;
+            if (!(to.to_flags & TOF_SACK))
+            	tp->t_flags &= ~TF_SACK_PERMIT;
 
 			if ((to.to_flags & TOF_SCALE) && (tp->t_flags & TF_REQ_SCALE)) {
 				int wscale = 0;

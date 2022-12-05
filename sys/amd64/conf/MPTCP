@@ -11,6 +11,8 @@ options 	ALT_BREAK_TO_DEBUGGER
 options 	IPFIREWALL
 options 	IPFIREWALL_DEFAULT_TO_ACCEPT
 
+options		SCTP
+
 nooptions	INET6
 nooptions	IPSEC
 

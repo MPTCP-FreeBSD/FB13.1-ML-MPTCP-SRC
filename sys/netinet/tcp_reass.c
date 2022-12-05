@@ -970,13 +970,18 @@ new_entry:
 		flags = th->th_flags & TH_FIN;
 		TCPSTAT_INC(tcps_rcvoopack);
 		TCPSTAT_ADD(tcps_rcvoobyte, *tlenp);
-		SOCKBUF_LOCK(&so->so_rcv);
 		if (so->so_rcv.sb_state & SBS_CANTRCVMORE) {
 			m_freem(m);
 		} else {
-			sbappendstream_locked(&so->so_rcv, m, 0);
+			/* XXXBKF: Queue segment for mptcp input and reassembly */
+			if (tp->t_segq_received) {
+				last_seg->m_nextpkt = m;
+				last_seg = m;
+			} else {
+				tp->t_segq_received = m;
+				last_seg = tp->t_segq_received;
+			}
 		}
-		tp->t_flags |= TF_WAKESOR;
 		return (flags);
 	}
 	if (tcp_new_limits) {

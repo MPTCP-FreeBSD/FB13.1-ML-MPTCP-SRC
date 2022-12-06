@@ -535,7 +535,7 @@ tcp_reass(struct tcpcb *tp, struct tcphdr *th, tcp_seq *seq_start,
 	struct mbuf *mlast = NULL;
 	struct sockbuf *sb;
 	struct socket *so = tp->t_inpcb->inp_socket;
-	struct mbuf *last_seg;
+	struct mbuf *last_seg = NULL;
 	char *s = NULL;
 	int flags, i, lenofoh;
 

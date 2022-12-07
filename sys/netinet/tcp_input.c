@@ -2189,6 +2189,7 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 		    m_tag_alloc(PACKET_COOKIE_MPTCP, PACKET_TAG_DSN, DSN_TAG_LEN,
 		        M_NOWAIT); // space for 64-bit DSN
 		struct m_tag *mtag = &dtag->tag;
+		dtag->dss_flags = 0;
 
 		/*
 		 * Convert 32bit DS map start sequence numbers into 64 bit.

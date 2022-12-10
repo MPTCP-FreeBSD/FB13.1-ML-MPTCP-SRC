@@ -16,3 +16,5 @@ options		SCTP
 nooptions	INET6
 nooptions	IPSEC
 
+nooptions	VIMAGE
+

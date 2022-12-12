@@ -1308,8 +1308,6 @@ findpcb:
 			    tp->ts_recent_age = tcp_ts_getticks();
 			}
 
-            if (to.to_flags & TOF_MSS)
-            	tcp_mss(tp, to.to_mss);
             if ((tp->t_flags & TF_SACK_PERMIT) && (to.to_flags & TOF_SACKPERM) == 0)
             	tp->t_flags &= ~TF_SACK_PERMIT;
 

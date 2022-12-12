@@ -1295,7 +1295,7 @@ int mp_output(struct mpcb *mp)
 	 * return with a locked inp */
 	sf = mp_get_subflow(mp);
 
-	if (mp->mp_state > MPS_M_ESTABLISHED)
+	if (sf != NULL && mp->mp_state > MPS_M_ESTABLISHED)
 		printf("%s: selected tp %p\n",__func__, sotoinpcb(sf->sf_so)->inp_ppcb);
 
 	/* No subflow was available to send data (e.g. all disconnected) */

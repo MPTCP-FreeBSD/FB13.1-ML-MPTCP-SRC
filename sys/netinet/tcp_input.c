@@ -1335,7 +1335,6 @@ findpcb:
             if (error)
             	printf("%s: error %d\n", __func__, error);
 
-			INP_INFO_WUNLOCK(&V_tcbinfo);
 			INP_INFO_WUNLOCK_ASSERT(&V_tcbinfo);
 			return (IPPROTO_DONE);
 		}

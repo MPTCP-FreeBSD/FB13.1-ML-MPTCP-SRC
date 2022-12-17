@@ -3412,6 +3412,18 @@ systrace_args(int sysnum, void *params, uint64_t *uarg, int *n_args)
 		*n_args = 2;
 		break;
 	}
+	/* set_cwnd */
+	case 583: {
+		struct set_cwnd_args *p = params;
+		iarg[0] = p->cwnd; /* int */
+		*n_args = 1;
+		break;
+	}
+	/* get_cwnd */
+	case 584: {
+		*n_args = 0;
+		break;
+	}
 	default:
 		*n_args = 0;
 		break;
@@ -9117,6 +9129,19 @@ systrace_entry_setargdesc(int sysnum, int ndx, char *desc, size_t descsz)
 			break;
 		};
 		break;
+	/* set_cwnd */
+	case 583:
+		switch (ndx) {
+		case 0:
+			p = "int";
+			break;
+		default:
+			break;
+		};
+		break;
+	/* get_cwnd */
+	case 584:
+		break;
 	default:
 		break;
 	};
@@ -11070,6 +11095,13 @@ systrace_return_setargdesc(int sysnum, int ndx, char *desc, size_t descsz)
 		if (ndx == 0 || ndx == 1)
 			p = "int";
 		break;
+	/* set_cwnd */
+	case 583:
+		if (ndx == 0 || ndx == 1)
+			p = "int";
+		break;
+	/* get_cwnd */
+	case 584:
 	default:
 		break;
 	};

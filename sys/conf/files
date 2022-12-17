@@ -4400,6 +4400,7 @@ netinet/mptcp_timer.c 		optional inet | inet6
 netinet/mptcp_pcb.c 		optional inet | inet6
 netinet/mptcp_usrreq.c 		optional inet
 netinet/mptcp_handshake.c 	optional inet
+netinet/mptcp_cc.c 		optional inet
 netinet/sctp_asconf.c		optional inet sctp | inet6 sctp
 netinet/sctp_auth.c		optional inet sctp | inet6 sctp
 netinet/sctp_bsd_addr.c		optional inet sctp | inet6 sctp

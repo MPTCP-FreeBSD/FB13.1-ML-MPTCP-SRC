@@ -1179,4 +1179,6 @@
 580	AUE_NULL	UNIMPL	fspacectl
 581	AUE_NULL	NOPROTO	{ int sched_getcpu(void); }
 582	AUE_NULL	UNIMPL	swapoff
+583	AUE_NULL	UNIMPL	set_cwnd
+584	AUE_NULL	UNIMPL	get_cwnd
 ; vim: syntax=off

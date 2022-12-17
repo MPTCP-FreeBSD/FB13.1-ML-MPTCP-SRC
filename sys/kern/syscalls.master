@@ -3283,6 +3283,14 @@
 		    u_int flags,
 		);
 	}
+583	AUE_NULL	STD {
+		int set_cwnd(
+			_In_ int cwnd
+		);
+	}
+584	AUE_NULL	STD {
+		int get_cwnd(void);
+	}
 
 ; Please copy any additions and changes to the following compatability tables:
 ; sys/compat/freebsd32/syscalls.master

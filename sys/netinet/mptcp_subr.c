@@ -3226,7 +3226,9 @@ mp_create_subflow_implicit(struct mpcb *mp, struct socket *so, struct ip *ip,
 	error = solisten_proto_check(sf_so);
 	if (error == 0) {
 		tp->t_state = TCPS_LISTEN;
-		solisten_proto(sf_so, 2);
+		sf_so->sol_qlimit = 2;
+		sf_so->so_options |= SO_ACCEPTCONN;
+		//solisten_proto(sf_so, 2);
 	}
 	SOCK_UNLOCK(sf_so);
 

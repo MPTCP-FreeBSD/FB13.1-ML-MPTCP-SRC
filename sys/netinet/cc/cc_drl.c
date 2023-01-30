@@ -107,20 +107,17 @@ drl_cb_init(struct cc_var *ccv)
 {
 	struct drl *drl_data;
 	struct ccv_node *cn;
-	struct inpcb *inp;
 
 	// Allocate local cc data
 	drl_data = malloc(sizeof(struct drl), M_DRL, M_NOWAIT|M_ZERO);
 	if (drl_data == NULL)
 		return (ENOMEM);
 
-	inp = CCV(ccv, t_inpcb);
-
 	// Initialise local cc data
 	drl_data->cwnd = 0;
 	drl_data->cwnd_prev = 0;
-	drl_data->laddr = inp->inp_laddr.s_addr;
-	drl_data->lport = inp->inp_lport;
+	drl_data->laddr = 0;
+	drl_data->lport = 0;
 
 	// Assign local cc data to ccv
 	ccv->cc_data = drl_data;
@@ -169,8 +166,8 @@ drl_ack_received(struct cc_var *ccv, uint16_t type)
 	pn->pkt.cwnd = CCV(ccv, snd_cwnd);
 	pn->pkt.smoothed_rtt = CCV(ccv, t_srtt);
 	pn->pkt.cong_events = 0;
-	pn->pkt.laddr = drl_data->laddr;
-	pn->pkt.lport = drl_data->lport;
+	pn->pkt.laddr = drl_data->laddr = CCV(ccv, t_inpcb)->inp_laddr.s_addr;
+	pn->pkt.lport = drl_data->lport = CCV(ccv, t_inpcb)->inp_lport;
 
 	// Push tcp stats to drl agent for processing
 	mtx_lock(&pkt_queue_mtx);
@@ -201,8 +198,8 @@ drl_cong_signal(struct cc_var *ccv, uint32_t type)
 	pn->pkt.cwnd = CCV(ccv, snd_cwnd);
 	pn->pkt.smoothed_rtt = CCV(ccv, t_srtt);
 	pn->pkt.cong_events = 1;
-	pn->pkt.laddr = drl_data->laddr;
-	pn->pkt.lport = drl_data->lport;
+	pn->pkt.laddr = drl_data->laddr = CCV(ccv, t_inpcb)->inp_laddr.s_addr;
+	pn->pkt.lport = drl_data->lport = CCV(ccv, t_inpcb)->inp_lport;
 	
 	// Push tcp stats to drl agent for processing
 	mtx_lock(&pkt_queue_mtx);
@@ -224,10 +221,19 @@ static void
 drl_after_idle(struct cc_var *ccv)
 {
 	uint32_t rw;
+	struct drl *drl_data;
+
+	drl_data = ccv->cc_data;
 
 	// Reset congestion window, as per RFC5681 Section 4.1.
 	rw = tcp_compute_initwnd(tcp_maxseg(ccv->ccvc.tcp));
-	CCV(ccv, snd_cwnd) = min(rw, CCV(ccv, snd_cwnd));
+	CCV(ccv, snd_cwnd) = drl_data->cwnd = drl_data->cwnd_prev = min(rw, CCV(ccv, snd_cwnd));
+
+	// Store local address and port
+	if (drl_data->laddr == 0)
+		drl_data->laddr = CCV(ccv, t_inpcb)->inp_laddr.s_addr;
+	if (drl_data->lport == 0)
+		drl_data->lport = CCV(ccv, t_inpcb)->inp_lport;
 }
 
 int

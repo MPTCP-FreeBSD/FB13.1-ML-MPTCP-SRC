@@ -3425,7 +3425,7 @@ systrace_args(int sysnum, void *params, uint64_t *uarg, int *n_args)
 	case 584: {
 		struct drl_get_buffer_args *p = params;
 		uarg[0] = (intptr_t)p->data; /* void * */
-		iarg[1] = p->size; /* int */
+		uarg[1] = (intptr_t)p->size; /* int * */
 		*n_args = 2;
 		break;
 	}
@@ -9157,7 +9157,7 @@ systrace_entry_setargdesc(int sysnum, int ndx, char *desc, size_t descsz)
 			p = "userland void *";
 			break;
 		case 1:
-			p = "int";
+			p = "userland int *";
 			break;
 		default:
 			break;

@@ -1861,7 +1861,7 @@ struct drl_update_cwnd_args {
 };
 struct drl_get_buffer_args {
 	char data_l_[PADL_(void *)]; void * data; char data_r_[PADR_(void *)];
-	char size_l_[PADL_(int)]; int size; char size_r_[PADR_(int)];
+	char size_l_[PADL_(int *)]; int * size; char size_r_[PADR_(int *)];
 };
 int	nosys(struct thread *, struct nosys_args *);
 void	sys_sys_exit(struct thread *, struct sys_exit_args *);

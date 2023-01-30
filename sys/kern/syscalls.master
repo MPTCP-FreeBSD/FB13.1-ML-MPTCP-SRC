@@ -3285,15 +3285,15 @@
 	}
 583	AUE_NULL	STD {
 		int drl_update_cwnd(
-			_In_ u_int cwnd,
-			_In_ u_int laddr,
-			_In_ u_int lport
+			u_int cwnd,
+			u_int laddr,
+			u_int lport
 		);
 	}
 584	AUE_NULL	STD {
 		int drl_get_buffer(
-			_Out_ void *data,
-			_Out_ int size
+			_Out_writes_(size) void *data,
+			_Out_ int *size
 		);
 	}
 

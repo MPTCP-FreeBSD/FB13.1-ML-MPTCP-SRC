@@ -62,7 +62,7 @@ struct drl {
 
 STAILQ_HEAD(pkthead, pkt_node) pkt_queue = STAILQ_HEAD_INITIALIZER(pkt_queue);
 static struct 	mtx pkt_queue_mtx;
-u_long 			pkt_queue_size = 0;
+static int	pkt_queue_size = 0;
 
 LIST_HEAD(ccvhead, ccv_node) ccv_list = LIST_HEAD_INITIALIZER(ccv_list);
 static struct 	mtx ccv_list_mtx;
@@ -262,7 +262,7 @@ sys_drl_get_buffer(struct thread *td, struct drl_get_buffer_args *uap)
 	struct pkt_node *pn;
 
 	struct pkt *pb;
-	u_long size;
+	int size;
 	int idx = 0;
 
 	// Return error if pkt queue is empty
@@ -294,7 +294,7 @@ sys_drl_get_buffer(struct thread *td, struct drl_get_buffer_args *uap)
 
 	// Copy buffer to user space
 	copyout(pb, uap->data, sizeof(struct pkt) * size);
-	uap->size = size;
+	copyout(&size, uap->size, sizeof(int));
 
 	// Free kernel memory
 	free(pb, M_DRL_PKT_BUFFER);

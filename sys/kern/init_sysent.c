@@ -638,6 +638,6 @@ struct sysent sysent[] = {
 	{ .sy_narg = 0, .sy_call = (sy_call_t *)nosys, .sy_auevent = AUE_NULL, .sy_flags = 0, .sy_thrcnt = SY_THR_ABSENT },			/* 580 = fspacectl */
 	{ .sy_narg = 0, .sy_call = (sy_call_t *)sys_sched_getcpu, .sy_auevent = AUE_NULL, .sy_flags = SYF_CAPENABLED, .sy_thrcnt = SY_THR_STATIC },	/* 581 = sched_getcpu */
 	{ .sy_narg = AS(swapoff_args), .sy_call = (sy_call_t *)sys_swapoff, .sy_auevent = AUE_SWAPOFF, .sy_flags = 0, .sy_thrcnt = SY_THR_STATIC },	/* 582 = swapoff */
-	{ .sy_narg = AS(set_cwnd_args), .sy_call = (sy_call_t *)sys_set_cwnd, .sy_auevent = AUE_NULL, .sy_flags = 0, .sy_thrcnt = SY_THR_STATIC },	/* 583 = set_cwnd */
-	{ .sy_narg = 0, .sy_call = (sy_call_t *)sys_get_cwnd, .sy_auevent = AUE_NULL, .sy_flags = 0, .sy_thrcnt = SY_THR_STATIC },	/* 584 = get_cwnd */
+	{ .sy_narg = AS(drl_update_cwnd_args), .sy_call = (sy_call_t *)sys_drl_update_cwnd, .sy_auevent = AUE_NULL, .sy_flags = 0, .sy_thrcnt = SY_THR_STATIC },	/* 583 = drl_update_cwnd */
+	{ .sy_narg = AS(drl_get_buffer_args), .sy_call = (sy_call_t *)sys_drl_get_buffer, .sy_auevent = AUE_NULL, .sy_flags = 0, .sy_thrcnt = SY_THR_STATIC },	/* 584 = drl_get_buffer */
 };

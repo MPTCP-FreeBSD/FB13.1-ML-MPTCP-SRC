@@ -519,6 +519,6 @@
 #define	SYS_aio_readv	579
 #define	SYS_sched_getcpu	581
 #define	SYS_swapoff	582
-#define	SYS_set_cwnd	583
-#define	SYS_get_cwnd	584
+#define	SYS_drl_update_cwnd	583
+#define	SYS_drl_get_buffer	584
 #define	SYS_MAXSYSCALL	585

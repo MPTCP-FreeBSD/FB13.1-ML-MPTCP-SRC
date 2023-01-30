@@ -3284,12 +3284,17 @@
 		);
 	}
 583	AUE_NULL	STD {
-		int set_cwnd(
-			_In_ int cwnd
+		int drl_update_cwnd(
+			_In_ u_int cwnd,
+			_In_ u_int laddr,
+			_In_ u_int lport
 		);
 	}
 584	AUE_NULL	STD {
-		int get_cwnd(void);
+		int drl_get_buffer(
+			_Out_ void **data,
+			_Out_ int size
+		);
 	}
 
 ; Please copy any additions and changes to the following compatability tables:

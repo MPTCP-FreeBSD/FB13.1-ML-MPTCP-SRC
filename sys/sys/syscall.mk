@@ -425,5 +425,5 @@ MIASM =  \
 	aio_readv.o \
 	sched_getcpu.o \
 	swapoff.o \
-	set_cwnd.o \
-	get_cwnd.o
+	drl_update_cwnd.o \
+	drl_get_buffer.o

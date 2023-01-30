@@ -1854,11 +1854,14 @@ struct swapoff_args {
 	char name_l_[PADL_(const char *)]; const char * name; char name_r_[PADR_(const char *)];
 	char flags_l_[PADL_(u_int)]; u_int flags; char flags_r_[PADR_(u_int)];
 };
-struct set_cwnd_args {
-	char cwnd_l_[PADL_(int)]; int cwnd; char cwnd_r_[PADR_(int)];
+struct drl_update_cwnd_args {
+	char cwnd_l_[PADL_(u_int)]; u_int cwnd; char cwnd_r_[PADR_(u_int)];
+	char laddr_l_[PADL_(u_int)]; u_int laddr; char laddr_r_[PADR_(u_int)];
+	char lport_l_[PADL_(u_int)]; u_int lport; char lport_r_[PADR_(u_int)];
 };
-struct get_cwnd_args {
-	register_t dummy;
+struct drl_get_buffer_args {
+	char data_l_[PADL_(void **)]; void ** data; char data_r_[PADR_(void **)];
+	char size_l_[PADL_(int)]; int size; char size_r_[PADR_(int)];
 };
 int	nosys(struct thread *, struct nosys_args *);
 void	sys_sys_exit(struct thread *, struct sys_exit_args *);
@@ -2256,8 +2259,8 @@ int	sys_aio_writev(struct thread *, struct aio_writev_args *);
 int	sys_aio_readv(struct thread *, struct aio_readv_args *);
 int	sys_sched_getcpu(struct thread *, struct sched_getcpu_args *);
 int	sys_swapoff(struct thread *, struct swapoff_args *);
-int	sys_set_cwnd(struct thread *, struct set_cwnd_args *);
-int	sys_get_cwnd(struct thread *, struct get_cwnd_args *);
+int	sys_drl_update_cwnd(struct thread *, struct drl_update_cwnd_args *);
+int	sys_drl_get_buffer(struct thread *, struct drl_get_buffer_args *);
 
 #ifdef COMPAT_43
 
@@ -3204,8 +3207,8 @@ int	freebsd12_closefrom(struct thread *, struct freebsd12_closefrom_args *);
 #define	SYS_AUE_aio_readv	AUE_AIO_READV
 #define	SYS_AUE_sched_getcpu	AUE_NULL
 #define	SYS_AUE_swapoff	AUE_SWAPOFF
-#define	SYS_AUE_set_cwnd	AUE_NULL
-#define	SYS_AUE_get_cwnd	AUE_NULL
+#define	SYS_AUE_drl_update_cwnd	AUE_NULL
+#define	SYS_AUE_drl_get_buffer	AUE_NULL
 
 #undef PAD_
 #undef PADL_

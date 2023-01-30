@@ -3292,7 +3292,7 @@
 	}
 584	AUE_NULL	STD {
 		int drl_get_buffer(
-			_Out_ void **data,
+			_Out_ void *data,
 			_Out_ int size
 		);
 	}

@@ -261,7 +261,7 @@ sys_drl_get_buffer(struct thread *td, struct drl_get_buffer_args *uap)
 	STAILQ_HEAD(pkthead, pkt_node) tmp_q = STAILQ_HEAD_INITIALIZER(tmp_q);
 	struct pkt_node *pn;
 
-	struct pkt **pb;
+	struct pkt *pb;
 	u_long size;
 	int idx = 0;
 
@@ -282,11 +282,11 @@ sys_drl_get_buffer(struct thread *td, struct drl_get_buffer_args *uap)
 	// Allocate and populate pkt buffer
 	pb = malloc(sizeof(struct pkt) * size, M_DRL_PKT_BUFFER, M_NOWAIT|M_ZERO);
 	STAILQ_FOREACH(pn, &tmp_q, nodes) {
-			pb[idx]->cwnd = pn->pkt.cwnd;
-			pb[idx]->smoothed_rtt = pn->pkt.smoothed_rtt;
-			pb[idx]->cong_events = pn->pkt.cong_events;
-			pb[idx]->laddr = pn->pkt.laddr;
-			pb[idx]->lport = pn->pkt.lport;
+			pb[idx].cwnd = pn->pkt.cwnd;
+			pb[idx].smoothed_rtt = pn->pkt.smoothed_rtt;
+			pb[idx].cong_events = pn->pkt.cong_events;
+			pb[idx].laddr = pn->pkt.laddr;
+			pb[idx].lport = pn->pkt.lport;
 			STAILQ_REMOVE_HEAD(&tmp_q, nodes);
 			free(pn, M_DRL_PKT_NODE);
 			idx++;

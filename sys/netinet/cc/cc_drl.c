@@ -26,17 +26,7 @@ __FBSDID("$FreeBSD$");
 #include <netinet/tcp_var.h>
 #include <netinet/cc/cc.h>
 #include <netinet/cc/cc_module.h>
-
-#define MAX_QUEUE_SIZE 10000
-
-struct pkt {
-	u_int		cwnd;
-	int			smoothed_rtt;
-	int			cong_events;
-
-	u_int		laddr;
-	u_int		lport;
-};
+#include <netinet/cc/cc_drl.h>
 
 struct pkt_node {
 	struct pkt	pkt;
@@ -171,7 +161,7 @@ drl_ack_received(struct cc_var *ccv, uint16_t type)
 
 	// Push tcp stats to drl agent for processing
 	mtx_lock(&pkt_queue_mtx);
-	if (pkt_queue_size >= MAX_QUEUE_SIZE)
+	if (pkt_queue_size >= CC_DRL_MAX_QUEUE)
 	{
 		STAILQ_REMOVE_HEAD(&pkt_queue, nodes);
 		pkt_queue_size--;
@@ -203,7 +193,7 @@ drl_cong_signal(struct cc_var *ccv, uint32_t type)
 	
 	// Push tcp stats to drl agent for processing
 	mtx_lock(&pkt_queue_mtx);
-	if (pkt_queue_size >= MAX_QUEUE_SIZE)
+	if (pkt_queue_size >= CC_DRL_MAX_QUEUE)
 	{
 		STAILQ_REMOVE_HEAD(&pkt_queue, nodes);
 		pkt_queue_size--;

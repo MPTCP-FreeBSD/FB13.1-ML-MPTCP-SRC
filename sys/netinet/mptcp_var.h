@@ -35,6 +35,10 @@
 #define MPTCP_VAR_H_
 
 #include <netinet/in.h>
+
+#include <netinet/tcp.h>
+#include <netinet/tcp_var.h>
+
 #include <netinet/mptcp_types.h>
 
 #define MAX_SUBFLOWS 8

@@ -136,6 +136,11 @@ mp_timer_rexmt(void * xmp)
 	}
 
 	mpp = mp->mp_mppcb;
+    
+    if (mpp->mpp_flags & MPP_DROPPED) {
+    	return;
+    }
+
     MPP_LOCK(mpp);
 
 	printf("%s: rxtshift %d, snd_nxt %u snd_una %u\n", __func__,

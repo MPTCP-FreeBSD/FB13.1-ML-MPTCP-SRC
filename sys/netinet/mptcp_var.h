@@ -48,7 +48,6 @@
 #define	BTOHEX_MSBLTOR	0x01
 #define	BTOHEX_MSBRTOL	0x02
 
-
 /* Is mptcp enabled? Determines whether MP_CAPABLE is put into outgoing SYNs,
  * or responded to if we receive a SYN + MP_CAPABLE */
 //VNET_DECLARE(int, tcp_do_mptcp);
@@ -56,6 +55,8 @@
 
 /* for malloc'ing list heads */
 MALLOC_DECLARE(M_REASSLISTHEAD);
+
+SYSCTL_DECL(_net_inet_tcp_mptcp);
 
 /*
  * Globally accessible index of addresses that can be
@@ -117,10 +118,6 @@ struct sf_handle {
     int    sf_flags;    /* subflow state flags */
 };
 
-struct mp_sched {
-	struct sf_handle *last_sf_selected;
-};
-
 /* Struct to hold socket options for the connection */
 struct mp_sopt {
        TAILQ_ENTRY(mp_sopt) next_mp_sopt;
@@ -172,8 +169,8 @@ struct mpcb {
 	u_int16_t mp_event_flags;   /* E.g. mp-signaling events */
 
 	struct taskqueue *mp_tq;	/* per-mp private task queue */
-	struct sched_algo *sched_algo; /* scheduling algorithm to use */
-
+	struct mp_sched_algo *mp_sched_algo;	/* scheduler algorithm */
+    struct mp_sched_var *mpschedv;			/* scheduler specific vars */
     /* Subflows */
 	TAILQ_HEAD(sf_handle_head, sf_handle) sf_list; /* (m) List of sf handles */
 	int mp_conn_address_count; /* number of addresses available to session */
@@ -275,8 +272,6 @@ struct mpcb {
 	int mp_sf_event_pending;   /* Is a sf event task already pending */
 	int mp_sf_close_pending;   /* Is a sf close task already pending */
     int mp_sf_detach_pending;  /* Is a sf detach task already pending */
-
-	struct mp_sched mp_temp_sched;
 };
 
 
@@ -590,7 +585,6 @@ typedef struct mptcp_key {
 VNET_DECLARE(int, max_subflows);
 VNET_DECLARE(int, single_packet_maps);
 
-
 void mpp_init(void);
 void mp_init(void);
 void mp_destroy(void);
@@ -652,6 +646,7 @@ struct mpcb*
         mp_locate_mpcb(uint32_t token);
 
 void mp_remtoklist(uint32_t local_token); /* free mpti entry */
+int	 mptcp_schedalgounload(struct mp_sched_algo *unload_algo);
 
 /* Managing Subflows */
 struct socket *

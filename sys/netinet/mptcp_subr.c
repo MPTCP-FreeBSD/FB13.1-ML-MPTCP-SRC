@@ -87,7 +87,8 @@
 #include <netinet/mptcp_var.h>
 #include <netinet/mptcp_timer.h>
 #include <netinet/mptcp_dtrace_declare.h>
-#include <netinet/mptcp_sched.h>
+
+#include <netinet/mp_sched/mp_sched.h>
 
 /* for SCTP auth functions */
 #include <netinet/sctp_pcb.h>
@@ -154,7 +155,8 @@ struct debug_class {
 };
 
 struct mpcb_mem {
-	struct	mpcb		mpcb;
+	struct	mpcb			mpcb;
+	struct	mp_sched_var	mpschedv;
 };
 
 uint32_t mp_active_debug_classes;
@@ -766,6 +768,21 @@ mp_newmpcb(struct mppcb *mpp)
 	/* Pointer to the multipath protocol control block */
 	mp->mp_mppcb = mpp;
 
+	/* Initialise mp_sched_var struct for this mpcb */
+	mp->mpschedv = &mpm->mpschedv;
+	mp->mpschedv->mp = mp;
+	
+	/* Use the current system default MP scheduler algorithm. */
+	MP_SCHED_LIST_RLOCK();
+	KASSERT(!STAILQ_EMPTY(&mp_sched_list), ("mp_sched_list is empty!"));
+	MP_SCHED_ALGO(mp) = MP_SCHED_DEFAULT();
+	MP_SCHED_LIST_RUNLOCK();
+	
+	/* Init mp scheduler, remove scheduler ref on fail to force fallback to single path */
+	if (MP_SCHED_ALGO(mp)->cb_init != NULL)
+		if (MP_SCHED_ALGO(mp)->cb_init(mp->mpschedv) > 0)
+			MP_SCHED_ALGO(mp) = NULL;
+	
 	/* tp is set only when we have a LISTEN tp */
 	mp->m_cb_ref.mp = mp;
 	mp->m_cb_ref.inp = NULL;
@@ -909,6 +926,9 @@ mp_bind_attach(struct socket *so, struct mpcb *mp,
 	tp->t_mpcb = mp;
 	tp->t_sf_flags |= SFF_LISTENTCPCB;
 	mp->m_cb_ref.inp = inp;
+	
+	
+	
 	INP_WUNLOCK(inp);
 
 	error = tcp_usr_bind(so, nam, td);
@@ -1289,12 +1309,14 @@ int mp_output(struct mpcb *mp)
 	/* NB: the length is being overridden to be all unmapped chars. should
 	 * however ensure that we don't append more than what the subflow can
 	 * fit in the send buffer */
-
-	/* XXXNJW: Temp while testing */
-	/* Select a subflow. A scheduler hook would go here. The scheduler should
-	 * return with a locked inp */
-	sf = mp_get_subflow(mp);
-
+	
+	/* XXXBKF: Scheduler hook to get subflow.
+	 * If function not defined, use first subflow as default */
+	if (MP_SCHED_ALGO(mp)->get_subflow != NULL)
+		sf = MP_SCHED_ALGO(mp)->get_subflow(mp->mpschedv);
+	else
+		sf = TAILQ_FIRST(&mp->sf_list);
+	
 	if (sf != NULL && mp->mp_state > MPS_M_ESTABLISHED)
 		printf("%s: selected tp %p\n",__func__, sotoinpcb(sf->sf_so)->inp_ppcb);
 
@@ -1638,6 +1660,13 @@ mp_discardcb(struct mpcb *mp)
 	callout_stop(&mp->mp_timers->mpt_rexmt);
 	callout_stop(&mp->mp_timers->mpt_timeout);
 	free(mp->mp_timers, M_MPTIMERS);
+
+	/* Allow the MP scheduler algorithm to clean up after itself. */
+	if (MP_SCHED_ALGO(mp) != NULL)
+		if (MP_SCHED_ALGO(mp)->cb_destroy != NULL)
+			MP_SCHED_ALGO(mp)->cb_destroy(MP_SCHED_VAR(mp));
+	MP_SCHED_VAR(mp) = NULL;
+	MP_SCHED_ALGO(mp) = NULL;
 
 	mpp->mpp_mpcb = NULL;
 	uma_zfree(V_mpcb_zone, mp);
@@ -3673,6 +3702,69 @@ mp_destroy(void) {
 	MPTOK_INFO_LOCK_DESTROY(&mp_tokinfo_list);
 //	uma_zdestroy(V_mpsopt_zone);
 	uma_zdestroy(V_mpcb_zone);
+}
+
+/*
+ * Switch the MP scheduler algorithm back to RoundRobin for any active
+ * control blocks using an algorithm which is about to go away.
+ * This ensures the MP scheduler framework can allow the unload to proceed 
+ * without leaving any dangling pointers which would trigger a panic.
+ * Returning non-zero would inform the MP scheduler framework that something went
+ * wrong and it would be unsafe to allow the unload to proceed. However, there is 
+ * no way for this to occur with this implementation so we always return zero.
+ */
+int
+mptcp_schedalgounload(struct mp_sched_algo *unload_algo)
+{
+	struct mp_sched_algo *tmpalgo;
+	struct inpcb *inp;
+	struct mpcb *mp;
+	VNET_ITERATOR_DECL(vnet_iter);
+
+	/*
+	 * Check all active control blocks across all network stacks and change
+	 * any that are using "unload_algo" back to NewReno. If "unload_algo"
+	 * requires cleanup code to be run, call it.
+	 */
+	VNET_LIST_RLOCK();
+	VNET_FOREACH(vnet_iter) {
+		CURVNET_SET(vnet_iter);
+		INP_INFO_WLOCK(&V_tcbinfo);
+		/*
+		 * New connections already part way through being initialised
+		 * with the CC algo we're removing will not race with this code
+		 * because the INP_INFO_WLOCK is held during initialisation. We
+		 * therefore don't enter the loop below until the connection
+		 * list has stabilised.
+		 */
+		CK_LIST_FOREACH(inp, &V_tcb, inp_list) {
+			INP_WLOCK(inp);
+			/* Important to skip tcptw structs. */
+			if (!(inp->inp_flags & INP_TIMEWAIT) &&
+			    (mp = intompcb(inp)) != NULL) {
+				/*
+				 * By holding INP_WLOCK here, we are assured
+				 * that the connection is not currently
+				 * executing inside the MP scheduler module's functions
+				 * i.e. it is safe to make the switch back to
+				 * RoundRobin.
+				 */
+				if (MP_SCHED_ALGO(mp) == unload_algo) {
+					tmpalgo = MP_SCHED_ALGO(mp);
+					if (tmpalgo->cb_destroy != NULL)
+						tmpalgo->cb_destroy(mp->mpschedv);
+					MP_SCHED_DATA(mp) = NULL;
+					MP_SCHED_ALGO(mp) = &roundrobin_mp_sched_algo;
+				}
+			}
+			INP_WUNLOCK(inp);
+		}
+		INP_INFO_WUNLOCK(&V_tcbinfo);
+		CURVNET_RESTORE();
+	}
+	VNET_LIST_RUNLOCK();
+
+	return (0);
 }
 
 SYSCTL_PROC(_net_inet_tcp_mptcp, OID_AUTO, mp_addresses, CTLTYPE_STRING|CTLFLAG_RW,

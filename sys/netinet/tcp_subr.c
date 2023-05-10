@@ -342,9 +342,11 @@ SYSCTL_INT(_net_inet_tcp, OID_AUTO, soreceive_stream, CTLFLAG_RDTUN,
     &tcp_soreceive_stream, 0, "Using soreceive_stream for TCP sockets");
 
 VNET_DEFINE(int, tcp_do_mptcp) = 1;
+/*
 SYSCTL_INT(_net_inet_tcp, OID_AUTO, mptcp, CTLFLAG_RW,
     &VNET_NAME(tcp_do_mptcp), 0,
     "Enable Multipath Support");
+*/
 
 VNET_DEFINE(uma_zone_t, sack_hole_zone);
 #define	V_sack_hole_zone		VNET(sack_hole_zone)

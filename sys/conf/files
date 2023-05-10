@@ -4398,6 +4398,7 @@ netinet/cc/cc_newreno.c		optional inet | inet6
 netinet/cc/cc_drl.c		optional inet
 netinet/mp_sched/mp_sched.c 			optional inet
 netinet/mp_sched/mp_sched_roundrobin.c	optional inet
+netinet/mp_sched/mp_sched_minrtt.c		optional inet
 netinet/mptcp_subr.c 		optional inet | inet6
 netinet/mptcp_timer.c 		optional inet | inet6
 netinet/mptcp_pcb.c 		optional inet | inet6

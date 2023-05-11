@@ -3296,6 +3296,29 @@
 			_Out_ int *size
 		);
 	}
+585	AUE_NULL	STD {
+		int mp_sched_dqn_set_proc(void);
+	}
+586	AUE_NULL	STD {
+		int mp_sched_dqn_clear_proc(void);
+	}
+587	AUE_NULL	STD {
+		int mp_sched_dqn_get_state(
+			_Out_ uintptr_t *mpcb_ptr,
+			_Out_ int *sf1_awnd,
+			_Out_ int *sf1_cwnd,
+			_Out_ int *sf1_rtt,
+			_Out_ int *sf2_awnd,
+			_Out_ int *sf2_cwnd,
+			_Out_ int *sf2_rtt
+		);
+	}
+588	AUE_NULL	STD {
+		int mp_sched_dqn_select_subflow(
+			uintptr_t mpcb_ptr,
+			int sf_select
+		);
+	}
 
 ; Please copy any additions and changes to the following compatability tables:
 ; sys/compat/freebsd32/syscalls.master

@@ -591,4 +591,8 @@ const char *syscallnames[] = {
 	"swapoff",			/* 582 = swapoff */
 	"drl_update_cwnd",			/* 583 = drl_update_cwnd */
 	"drl_get_buffer",			/* 584 = drl_get_buffer */
+	"mp_sched_dqn_set_proc",			/* 585 = mp_sched_dqn_set_proc */
+	"mp_sched_dqn_clear_proc",			/* 586 = mp_sched_dqn_clear_proc */
+	"mp_sched_dqn_get_state",			/* 587 = mp_sched_dqn_get_state */
+	"mp_sched_dqn_select_subflow",			/* 588 = mp_sched_dqn_select_subflow */
 };

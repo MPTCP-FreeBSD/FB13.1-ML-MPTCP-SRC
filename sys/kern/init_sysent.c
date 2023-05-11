@@ -640,4 +640,8 @@ struct sysent sysent[] = {
 	{ .sy_narg = AS(swapoff_args), .sy_call = (sy_call_t *)sys_swapoff, .sy_auevent = AUE_SWAPOFF, .sy_flags = 0, .sy_thrcnt = SY_THR_STATIC },	/* 582 = swapoff */
 	{ .sy_narg = AS(drl_update_cwnd_args), .sy_call = (sy_call_t *)sys_drl_update_cwnd, .sy_auevent = AUE_NULL, .sy_flags = 0, .sy_thrcnt = SY_THR_STATIC },	/* 583 = drl_update_cwnd */
 	{ .sy_narg = AS(drl_get_buffer_args), .sy_call = (sy_call_t *)sys_drl_get_buffer, .sy_auevent = AUE_NULL, .sy_flags = 0, .sy_thrcnt = SY_THR_STATIC },	/* 584 = drl_get_buffer */
+	{ .sy_narg = 0, .sy_call = (sy_call_t *)sys_mp_sched_dqn_set_proc, .sy_auevent = AUE_NULL, .sy_flags = 0, .sy_thrcnt = SY_THR_STATIC },	/* 585 = mp_sched_dqn_set_proc */
+	{ .sy_narg = 0, .sy_call = (sy_call_t *)sys_mp_sched_dqn_clear_proc, .sy_auevent = AUE_NULL, .sy_flags = 0, .sy_thrcnt = SY_THR_STATIC },	/* 586 = mp_sched_dqn_clear_proc */
+	{ .sy_narg = AS(mp_sched_dqn_get_state_args), .sy_call = (sy_call_t *)sys_mp_sched_dqn_get_state, .sy_auevent = AUE_NULL, .sy_flags = 0, .sy_thrcnt = SY_THR_STATIC },	/* 587 = mp_sched_dqn_get_state */
+	{ .sy_narg = AS(mp_sched_dqn_select_subflow_args), .sy_call = (sy_call_t *)sys_mp_sched_dqn_select_subflow, .sy_auevent = AUE_NULL, .sy_flags = 0, .sy_thrcnt = SY_THR_STATIC },	/* 588 = mp_sched_dqn_select_subflow */
 };

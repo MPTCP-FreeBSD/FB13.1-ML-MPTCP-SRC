@@ -521,4 +521,8 @@
 #define	SYS_swapoff	582
 #define	SYS_drl_update_cwnd	583
 #define	SYS_drl_get_buffer	584
-#define	SYS_MAXSYSCALL	585
+#define	SYS_mp_sched_dqn_set_proc	585
+#define	SYS_mp_sched_dqn_clear_proc	586
+#define	SYS_mp_sched_dqn_get_state	587
+#define	SYS_mp_sched_dqn_select_subflow	588
+#define	SYS_MAXSYSCALL	589

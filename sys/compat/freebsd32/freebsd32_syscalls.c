@@ -619,4 +619,10 @@ const char *freebsd32_syscallnames[] = {
 	"#580",			/* 580 = fspacectl */
 	"sched_getcpu",			/* 581 = sched_getcpu */
 	"#582",			/* 582 = swapoff */
+	"#583",			/* 583 = drl_update_cwnd */
+	"#584",			/* 584 = drl_get_buffer */
+	"#585",			/* 585 = mp_sched_dqn_set_proc */
+	"#586",			/* 586 = mp_sched_dqn_clear_proc */
+	"#587",			/* 587 = mp_sched_dqn_get_state */
+	"#588",			/* 588 = mp_sched_dqn_select_subflow */
 };

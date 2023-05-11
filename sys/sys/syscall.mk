@@ -426,4 +426,8 @@ MIASM =  \
 	sched_getcpu.o \
 	swapoff.o \
 	drl_update_cwnd.o \
-	drl_get_buffer.o
+	drl_get_buffer.o \
+	mp_sched_dqn_set_proc.o \
+	mp_sched_dqn_clear_proc.o \
+	mp_sched_dqn_get_state.o \
+	mp_sched_dqn_select_subflow.o

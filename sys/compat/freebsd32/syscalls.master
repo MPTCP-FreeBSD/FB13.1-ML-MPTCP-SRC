@@ -1181,4 +1181,8 @@
 582	AUE_NULL	UNIMPL	swapoff
 583	AUE_NULL	UNIMPL	drl_update_cwnd
 584	AUE_NULL	UNIMPL	drl_get_buffer
+585	AUE_NULL	UNIMPL	mp_sched_dqn_set_proc
+586	AUE_NULL	UNIMPL	mp_sched_dqn_clear_proc
+587 AUE_NULL	UNIMPL	mp_sched_dqn_get_state
+588 AUE_NULL	UNIMPL	mp_sched_dqn_select_subflow
 ; vim: syntax=off

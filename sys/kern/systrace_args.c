@@ -3429,6 +3429,37 @@ systrace_args(int sysnum, void *params, uint64_t *uarg, int *n_args)
 		*n_args = 2;
 		break;
 	}
+	/* mp_sched_dqn_set_proc */
+	case 585: {
+		*n_args = 0;
+		break;
+	}
+	/* mp_sched_dqn_clear_proc */
+	case 586: {
+		*n_args = 0;
+		break;
+	}
+	/* mp_sched_dqn_get_state */
+	case 587: {
+		struct mp_sched_dqn_get_state_args *p = params;
+		uarg[0] = (intptr_t)p->mpcb_ptr; /* uintptr_t * */
+		uarg[1] = (intptr_t)p->sf1_awnd; /* int * */
+		uarg[2] = (intptr_t)p->sf1_cwnd; /* int * */
+		uarg[3] = (intptr_t)p->sf1_rtt; /* int * */
+		uarg[4] = (intptr_t)p->sf2_awnd; /* int * */
+		uarg[5] = (intptr_t)p->sf2_cwnd; /* int * */
+		uarg[6] = (intptr_t)p->sf2_rtt; /* int * */
+		*n_args = 7;
+		break;
+	}
+	/* mp_sched_dqn_select_subflow */
+	case 588: {
+		struct mp_sched_dqn_select_subflow_args *p = params;
+		uarg[0] = p->mpcb_ptr; /* uintptr_t */
+		iarg[1] = p->sf_select; /* int */
+		*n_args = 2;
+		break;
+	}
 	default:
 		*n_args = 0;
 		break;
@@ -9163,6 +9194,53 @@ systrace_entry_setargdesc(int sysnum, int ndx, char *desc, size_t descsz)
 			break;
 		};
 		break;
+	/* mp_sched_dqn_set_proc */
+	case 585:
+		break;
+	/* mp_sched_dqn_clear_proc */
+	case 586:
+		break;
+	/* mp_sched_dqn_get_state */
+	case 587:
+		switch (ndx) {
+		case 0:
+			p = "userland uintptr_t *";
+			break;
+		case 1:
+			p = "userland int *";
+			break;
+		case 2:
+			p = "userland int *";
+			break;
+		case 3:
+			p = "userland int *";
+			break;
+		case 4:
+			p = "userland int *";
+			break;
+		case 5:
+			p = "userland int *";
+			break;
+		case 6:
+			p = "userland int *";
+			break;
+		default:
+			break;
+		};
+		break;
+	/* mp_sched_dqn_select_subflow */
+	case 588:
+		switch (ndx) {
+		case 0:
+			p = "uintptr_t";
+			break;
+		case 1:
+			p = "int";
+			break;
+		default:
+			break;
+		};
+		break;
 	default:
 		break;
 	};
@@ -11123,6 +11201,20 @@ systrace_return_setargdesc(int sysnum, int ndx, char *desc, size_t descsz)
 		break;
 	/* drl_get_buffer */
 	case 584:
+		if (ndx == 0 || ndx == 1)
+			p = "int";
+		break;
+	/* mp_sched_dqn_set_proc */
+	case 585:
+	/* mp_sched_dqn_clear_proc */
+	case 586:
+	/* mp_sched_dqn_get_state */
+	case 587:
+		if (ndx == 0 || ndx == 1)
+			p = "int";
+		break;
+	/* mp_sched_dqn_select_subflow */
+	case 588:
 		if (ndx == 0 || ndx == 1)
 			p = "int";
 		break;

@@ -1863,6 +1863,25 @@ struct drl_get_buffer_args {
 	char data_l_[PADL_(void *)]; void * data; char data_r_[PADR_(void *)];
 	char size_l_[PADL_(int *)]; int * size; char size_r_[PADR_(int *)];
 };
+struct mp_sched_dqn_set_proc_args {
+	register_t dummy;
+};
+struct mp_sched_dqn_clear_proc_args {
+	register_t dummy;
+};
+struct mp_sched_dqn_get_state_args {
+	char mpcb_ptr_l_[PADL_(uintptr_t *)]; uintptr_t * mpcb_ptr; char mpcb_ptr_r_[PADR_(uintptr_t *)];
+	char sf1_awnd_l_[PADL_(int *)]; int * sf1_awnd; char sf1_awnd_r_[PADR_(int *)];
+	char sf1_cwnd_l_[PADL_(int *)]; int * sf1_cwnd; char sf1_cwnd_r_[PADR_(int *)];
+	char sf1_rtt_l_[PADL_(int *)]; int * sf1_rtt; char sf1_rtt_r_[PADR_(int *)];
+	char sf2_awnd_l_[PADL_(int *)]; int * sf2_awnd; char sf2_awnd_r_[PADR_(int *)];
+	char sf2_cwnd_l_[PADL_(int *)]; int * sf2_cwnd; char sf2_cwnd_r_[PADR_(int *)];
+	char sf2_rtt_l_[PADL_(int *)]; int * sf2_rtt; char sf2_rtt_r_[PADR_(int *)];
+};
+struct mp_sched_dqn_select_subflow_args {
+	char mpcb_ptr_l_[PADL_(uintptr_t)]; uintptr_t mpcb_ptr; char mpcb_ptr_r_[PADR_(uintptr_t)];
+	char sf_select_l_[PADL_(int)]; int sf_select; char sf_select_r_[PADR_(int)];
+};
 int	nosys(struct thread *, struct nosys_args *);
 void	sys_sys_exit(struct thread *, struct sys_exit_args *);
 int	sys_fork(struct thread *, struct fork_args *);
@@ -2261,6 +2280,10 @@ int	sys_sched_getcpu(struct thread *, struct sched_getcpu_args *);
 int	sys_swapoff(struct thread *, struct swapoff_args *);
 int	sys_drl_update_cwnd(struct thread *, struct drl_update_cwnd_args *);
 int	sys_drl_get_buffer(struct thread *, struct drl_get_buffer_args *);
+int	sys_mp_sched_dqn_set_proc(struct thread *, struct mp_sched_dqn_set_proc_args *);
+int	sys_mp_sched_dqn_clear_proc(struct thread *, struct mp_sched_dqn_clear_proc_args *);
+int	sys_mp_sched_dqn_get_state(struct thread *, struct mp_sched_dqn_get_state_args *);
+int	sys_mp_sched_dqn_select_subflow(struct thread *, struct mp_sched_dqn_select_subflow_args *);
 
 #ifdef COMPAT_43
 
@@ -3209,6 +3232,10 @@ int	freebsd12_closefrom(struct thread *, struct freebsd12_closefrom_args *);
 #define	SYS_AUE_swapoff	AUE_SWAPOFF
 #define	SYS_AUE_drl_update_cwnd	AUE_NULL
 #define	SYS_AUE_drl_get_buffer	AUE_NULL
+#define	SYS_AUE_mp_sched_dqn_set_proc	AUE_NULL
+#define	SYS_AUE_mp_sched_dqn_clear_proc	AUE_NULL
+#define	SYS_AUE_mp_sched_dqn_get_state	AUE_NULL
+#define	SYS_AUE_mp_sched_dqn_select_subflow	AUE_NULL
 
 #undef PAD_
 #undef PADL_

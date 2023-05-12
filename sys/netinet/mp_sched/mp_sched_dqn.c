@@ -133,7 +133,7 @@ dqn_cb_init(struct mp_sched_var *mpschedv)
 static void
 dqn_cb_destroy(struct mp_sched_var *mpschedv)
 {
-	struct dqn *dqn_data;
+	struct dqn *dqn_data = NULL;
 	
 	dqn_data = mpschedv->mp_sched_data;
 	
@@ -148,61 +148,125 @@ dqn_cb_destroy(struct mp_sched_var *mpschedv)
 static struct sf_handle *
 dqn_get_subflow(struct mp_sched_var *mpschedv)
 {
-	struct dqn *dqn_data;
-	struct mpcb *mp;
-	struct state *se;
-	struct sf_handle *sf;
-	struct inpcb *inp;
-	struct tcpcb *tp;
+	struct dqn *dqn_data = NULL;
+	struct mpcb *mp = NULL;
+	struct state *se = NULL;
+	struct sf_handle *sf = NULL;
+	u_int starttime = 0;
+	struct inpcb *inp = NULL;
+	struct tcpcb *tp = NULL;
+	bool timeout = FALSE;
 	
 	dqn_data = mpschedv->mp_sched_data;
 	mp = mpschedv->mp;
 	
+	/* Fallback to RoundRobin if no user process registered as handler */
 	if (DQN_PROC() == NULL)
 		goto fallback;
 	
+	/* Allocate state memory, fallback to RoundRobin on failure */
 	se = malloc(sizeof(struct state), M_STATE, M_NOWAIT|M_ZERO);
 	if (se == NULL)
 		goto fallback;
 	
+	/* Populate general state info */
 	se->mpcb_ptr = mp;
 	se->sema_ptr = &dqn_data->sema;
 	se->sent = FALSE;
 	se->sf_select = -1;
 	
+	/* Get first subflow, return NULL if no subflows in list */
 	sf = TAILQ_FIRST(&mp->sf_list);
 	if (sf == NULL) {
-		free(se, M_STATE);
-		goto fallback;
+		goto out;
 	}
 	
 	inp = sotoinpcb(sf->sf_so);
 	tp = intotcpcb(inp);
+	INP_WLOCK(inp);
+	
+	/* Check subflow is available for transmission */
+	if (inp->inp_flags & (INP_DROPPED | INP_TIMEWAIT)) {
+		sf->sf_flags |= SFHS_MPENDED;
+	
+		if (tp->t_sf_state & SFS_MP_DISCONNECTED)
+			mp_schedule_tasks(mp, MP_SCHEDCLOSE);
+	
+		INP_WUNLOCK(inp);
+		goto fallback;
+	}
+	
+	if ((tp->t_state < TCPS_ESTABLISHED) || tp->t_rxtshift) {
+		INP_WUNLOCK(inp);
+		goto fallback;
+	}
+	
+	/* Populate subflow 1 info */
 	se->sf1_ptr = sf;
 	se->sf1_awnd = V_tcp_do_rfc6675_pipe ? tcp_compute_pipe(tp) : tp->snd_max - tp->snd_una;
 	se->sf1_cwnd = (int)tp->snd_cwnd;
 	se->sf1_rtt = tp->t_srtt;
 	
+	INP_WUNLOCK(inp);
+	
+	/* Get second subflow, return subflow 1 if only 1 subflow in list */
 	sf = TAILQ_NEXT(sf, next_sf_handle);
 	if (sf == NULL) {
-		free(se, M_STATE);
-		goto fallback;
+		sf = se->sf1_ptr;
+		goto out;
 	}
 	
 	inp = sotoinpcb(sf->sf_so);
 	tp = intotcpcb(inp);
+	INP_WLOCK(inp);
+	
+	/* Check subflow is available for transmission */
+	if (inp->inp_flags & (INP_DROPPED | INP_TIMEWAIT)) {
+		sf->sf_flags |= SFHS_MPENDED;
+	
+		if (tp->t_sf_state & SFS_MP_DISCONNECTED)
+			mp_schedule_tasks(mp, MP_SCHEDCLOSE);
+	
+		INP_WUNLOCK(inp);
+		goto fallback;
+	}
+	
+	if ((tp->t_state < TCPS_ESTABLISHED) || tp->t_rxtshift) {
+		INP_WUNLOCK(inp);
+		goto fallback;
+	}
+	
+	/* Populate subflow 2 info */
 	se->sf2_ptr = sf;
 	se->sf2_awnd = V_tcp_do_rfc6675_pipe ? tcp_compute_pipe(tp) : tp->snd_max - tp->snd_una;
 	se->sf2_cwnd = (int)tp->snd_cwnd;
 	se->sf2_rtt = tp->t_srtt;
 	
+	INP_WUNLOCK(inp);
+	
+	/* Queue state info for processing */
 	STATE_QUEUE_WLOCK();
 	STAILQ_INSERT_TAIL(&state_queue, se, entries);
 	STATE_QUEUE_WUNLOCK();
-
-	kern_psignal(DQN_PROC(), SIGUSR1);
-	sema_timedwait(se->sema_ptr, SEM_WAIT_TIMEOUT);
 	
+	/* Signal user agent and wait for response */
+	kern_psignal(DQN_PROC(), SIGUSR1);
+	starttime = ticks;
+	timeout = TRUE;
+	while ((ticks - starttime) < 100) {
+		if (sema_trywait(se->sema_ptr)) {
+			timeout = FALSE;
+			break;
+		}
+	}
+	
+	/* If no response, assume user agent has failed or is no longer running. Kill and clear process. */
+	if (timeout) {
+		kern_psignal(DQN_PROC(), SIGKILL);
+		DQN_PROC() = NULL;
+	}
+	
+	/* Remove state info from queue */
 	STATE_QUEUE_WLOCK();
 	STAILQ_REMOVE(&state_queue, se, state, entries);
 	STATE_QUEUE_WUNLOCK();
@@ -210,25 +274,29 @@ dqn_get_subflow(struct mp_sched_var *mpschedv)
 	/* Process response, sf_select will be -1 if DQN agent did not handle in time */
 	if (se->sf_select == 1) {
 		sf = se->sf1_ptr;
-		free(se, M_STATE);
-		return sf;
+		goto out;
 	}
 	else if (se->sf_select == 2) {
 		sf = se->sf2_ptr;
-		free(se, M_STATE);
-		return sf;
+		goto out;
 	}
 	else {
-		free(se, M_STATE);
 		goto fallback;
 	}
 	
 fallback:
 	/* Fallback to RoundRobin if no DQN PID registered */
 	if (dqn_data->fb_algo->get_subflow != NULL)
-		return dqn_data->fb_algo->get_subflow(&dqn_data->fb_mpschedv);
+		sf = dqn_data->fb_algo->get_subflow(&dqn_data->fb_mpschedv);
 	else
-		return TAILQ_FIRST(&mp->sf_list);
+		sf =  TAILQ_FIRST(&mp->sf_list);
+	
+out:
+	/* Cleanup memory and return selection */
+	if (se != NULL)
+		free(se, M_STATE);
+		
+	return sf;
 }
 
 

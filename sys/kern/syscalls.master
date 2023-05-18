@@ -3304,18 +3304,16 @@
 	}
 587	AUE_NULL	STD {
 		int mp_sched_dqn_get_state(
-			_Out_ uintptr_t *mpcb_ptr,
-			_Out_ int *sf1_awnd,
-			_Out_ int *sf1_cwnd,
-			_Out_ int *sf1_rtt,
-			_Out_ int *sf2_awnd,
-			_Out_ int *sf2_cwnd,
-			_Out_ int *sf2_rtt
+			_Out_ u_int *ref,
+			_Out_ struct state *sf1_prev_state,
+			_Out_ struct state *sf1_state,
+			_Out_ struct state *sf2_prev_state,
+            _Out_ struct state *sf2_state
 		);
 	}
 588	AUE_NULL	STD {
 		int mp_sched_dqn_select_subflow(
-			uintptr_t mpcb_ptr,
+			u_int ref,
 			int sf_select
 		);
 	}

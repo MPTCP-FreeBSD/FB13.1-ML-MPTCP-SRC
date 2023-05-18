@@ -3442,20 +3442,18 @@ systrace_args(int sysnum, void *params, uint64_t *uarg, int *n_args)
 	/* mp_sched_dqn_get_state */
 	case 587: {
 		struct mp_sched_dqn_get_state_args *p = params;
-		uarg[0] = (intptr_t)p->mpcb_ptr; /* uintptr_t * */
-		uarg[1] = (intptr_t)p->sf1_awnd; /* int * */
-		uarg[2] = (intptr_t)p->sf1_cwnd; /* int * */
-		uarg[3] = (intptr_t)p->sf1_rtt; /* int * */
-		uarg[4] = (intptr_t)p->sf2_awnd; /* int * */
-		uarg[5] = (intptr_t)p->sf2_cwnd; /* int * */
-		uarg[6] = (intptr_t)p->sf2_rtt; /* int * */
-		*n_args = 7;
+		uarg[0] = (intptr_t)p->ref; /* u_int * */
+		uarg[1] = (intptr_t)p->sf1_prev_state; /* struct state * */
+		uarg[2] = (intptr_t)p->sf1_state; /* struct state * */
+		uarg[3] = (intptr_t)p->sf2_prev_state; /* struct state * */
+		uarg[4] = (intptr_t)p->sf2_state; /* struct state * */
+		*n_args = 5;
 		break;
 	}
 	/* mp_sched_dqn_select_subflow */
 	case 588: {
 		struct mp_sched_dqn_select_subflow_args *p = params;
-		uarg[0] = p->mpcb_ptr; /* uintptr_t */
+		uarg[0] = p->ref; /* u_int */
 		iarg[1] = p->sf_select; /* int */
 		*n_args = 2;
 		break;
@@ -9204,25 +9202,19 @@ systrace_entry_setargdesc(int sysnum, int ndx, char *desc, size_t descsz)
 	case 587:
 		switch (ndx) {
 		case 0:
-			p = "userland uintptr_t *";
+			p = "userland u_int *";
 			break;
 		case 1:
-			p = "userland int *";
+			p = "userland struct state *";
 			break;
 		case 2:
-			p = "userland int *";
+			p = "userland struct state *";
 			break;
 		case 3:
-			p = "userland int *";
+			p = "userland struct state *";
 			break;
 		case 4:
-			p = "userland int *";
-			break;
-		case 5:
-			p = "userland int *";
-			break;
-		case 6:
-			p = "userland int *";
+			p = "userland struct state *";
 			break;
 		default:
 			break;
@@ -9232,7 +9224,7 @@ systrace_entry_setargdesc(int sysnum, int ndx, char *desc, size_t descsz)
 	case 588:
 		switch (ndx) {
 		case 0:
-			p = "uintptr_t";
+			p = "u_int";
 			break;
 		case 1:
 			p = "int";

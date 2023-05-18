@@ -1870,16 +1870,14 @@ struct mp_sched_dqn_clear_proc_args {
 	register_t dummy;
 };
 struct mp_sched_dqn_get_state_args {
-	char mpcb_ptr_l_[PADL_(uintptr_t *)]; uintptr_t * mpcb_ptr; char mpcb_ptr_r_[PADR_(uintptr_t *)];
-	char sf1_awnd_l_[PADL_(int *)]; int * sf1_awnd; char sf1_awnd_r_[PADR_(int *)];
-	char sf1_cwnd_l_[PADL_(int *)]; int * sf1_cwnd; char sf1_cwnd_r_[PADR_(int *)];
-	char sf1_rtt_l_[PADL_(int *)]; int * sf1_rtt; char sf1_rtt_r_[PADR_(int *)];
-	char sf2_awnd_l_[PADL_(int *)]; int * sf2_awnd; char sf2_awnd_r_[PADR_(int *)];
-	char sf2_cwnd_l_[PADL_(int *)]; int * sf2_cwnd; char sf2_cwnd_r_[PADR_(int *)];
-	char sf2_rtt_l_[PADL_(int *)]; int * sf2_rtt; char sf2_rtt_r_[PADR_(int *)];
+	char ref_l_[PADL_(u_int *)]; u_int * ref; char ref_r_[PADR_(u_int *)];
+	char sf1_prev_state_l_[PADL_(struct state *)]; struct state * sf1_prev_state; char sf1_prev_state_r_[PADR_(struct state *)];
+	char sf1_state_l_[PADL_(struct state *)]; struct state * sf1_state; char sf1_state_r_[PADR_(struct state *)];
+	char sf2_prev_state_l_[PADL_(struct state *)]; struct state * sf2_prev_state; char sf2_prev_state_r_[PADR_(struct state *)];
+	char sf2_state_l_[PADL_(struct state *)]; struct state * sf2_state; char sf2_state_r_[PADR_(struct state *)];
 };
 struct mp_sched_dqn_select_subflow_args {
-	char mpcb_ptr_l_[PADL_(uintptr_t)]; uintptr_t mpcb_ptr; char mpcb_ptr_r_[PADR_(uintptr_t)];
+	char ref_l_[PADL_(u_int)]; u_int ref; char ref_r_[PADR_(u_int)];
 	char sf_select_l_[PADL_(int)]; int sf_select; char sf_select_r_[PADR_(int)];
 };
 int	nosys(struct thread *, struct nosys_args *);

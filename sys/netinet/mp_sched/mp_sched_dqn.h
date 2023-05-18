@@ -29,49 +29,67 @@
 #ifndef _NETINET_MP_SCHED_DQN_H_
 #define _NETINET_MP_SCHED_DQN_H_
 
-#define SEM_WAIT_TIMEOUT 500000
+#define DQN_TIMEOUT 50
+#define DQN_MAX_ATTEMPTS 5
 
 /* Global vars */
-extern STAILQ_HEAD(state_head, state) state_queue;
+extern STAILQ_HEAD(state_head, state_entry) state_queue;
 
 /* Per-netstack bits. */
 VNET_DECLARE(struct proc *, mp_sched_dqn_proc_ptr);
 #define	V_mp_sched_dqn_proc_ptr VNET(mp_sched_dqn_proc_ptr)
+
+VNET_DECLARE(uint32_t, mp_sched_dqn_ref_ctr);
+#define	V_mp_sched_dqn_ref_ctr VNET(mp_sched_dqn_ref_ctr)
+
+/* Structure for DQN state information */
+struct state {
+    int awnd;
+    int cwnd;
+    int swnd;
+    int rtt;
+    int rttvar;
+};
+
+/* State entry structure for queuing and DQN agent coordination */
+struct state_entry {
+    /* Reference number for lookup */
+    uint32_t ref;
+    
+    /* Coordination with DQN handler */
+    int sf_select;
+    bool sent;
+    struct rwlock lock;
+    
+    /* Subflow 1 metrics */
+    struct sf_handle *sf1_handle;
+    struct state sf1_prev_state;
+    struct state sf1_state;
+    
+    /* Subflow 2 metrics */
+    struct sf_handle *sf2_handle;
+    struct state sf2_prev_state;
+    struct state sf2_state;
+    
+    STAILQ_ENTRY(state_entry) entries;
+};
 
 /* Algorithm-specific data */
 struct dqn {
 	/* Structures for fallback algorithm */
 	struct mp_sched_algo *fb_algo;
 	struct mp_sched_var fb_mpschedv;
-	
-	struct sema sema;
-	
-	uint32_t flags;
-	
-};
 
-/* State structure for queuing and copy to user */
-struct state {
-    struct mpcb	*mpcb_ptr;
-    struct sema *sema_ptr;
-    int sf_select;
-    bool sent;
-    
-    struct sf_handle *sf1_ptr;
-    int	sf1_awnd;
-    int sf1_cwnd;
-    int	sf1_rtt;
-    
-    struct sf_handle *sf2_ptr;
-    int	sf2_awnd;
-    int	sf2_cwnd;
-    int	sf2_rtt;
-    
-    STAILQ_ENTRY(state) entries;
+	/* Previous state metrics for subflows */
+	struct state sf1_prev_state;
+	struct state sf2_prev_state;
 };
 
 /* Macro to obtain the DQN proc pointer */
 #define	DQN_PROC()	V_mp_sched_dqn_proc_ptr
+
+/* Macro to obtain the next DQN reference number */
+#define	DQN_REF_NEXT()	V_mp_sched_dqn_ref_ctr++;
 
 extern struct rwlock state_queue_lock;
 #define	STATE_QUEUE_LOCK_INIT()		rw_init(&state_queue_lock, "state_queue")

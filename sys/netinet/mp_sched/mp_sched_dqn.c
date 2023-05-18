@@ -179,6 +179,8 @@ dqn_get_subflow(struct mp_sched_var *mpschedv)
 	
 	/* Init coordination values */
 	se->ref = DQN_REF_NEXT();
+	se->action = -1;
+	se->prev_action = dqn_data->prev_action;
 	rw_init(&se->lock, "state_entry");
 	
 	/* Get first subflow, return NULL if no subflows in list */
@@ -277,8 +279,9 @@ dqn_get_subflow(struct mp_sched_var *mpschedv)
 	    startticks = ticks;
 	    while(ticks - startticks < DQN_TIMEOUT) {
 	        rw_rlock(&se->lock);
-            if (se->sf_select != 0) {
+            if (se->action > -1) {
                 response = TRUE;
+                dqn_data->prev_action = se->action;
                 rw_runlock(&se->lock);
                 break;
             }
@@ -304,12 +307,12 @@ dqn_get_subflow(struct mp_sched_var *mpschedv)
 	STATE_QUEUE_WUNLOCK();
 	
 	/* Process response */
-    switch (se->sf_select) {
-    case 1:
+    switch (se->action) {
+    case 0:
         sf = se->sf1_handle;
         goto out;
         break;
-    case 2:
+    case 1:
         sf = se->sf2_handle;
         goto out;
         break;
@@ -377,9 +380,10 @@ sys_mp_sched_dqn_get_state(struct thread *td, struct mp_sched_dqn_get_state_args
 	/* Copy values from kernel to user */
 	copyout(&se->ref, uap->ref, sizeof(uint32_t));
 	copyout(&se->sf1_prev_state, uap->sf1_prev_state, sizeof(struct state));
-	copyout(&se->sf1_state, uap->sf1_state, sizeof(struct state));
 	copyout(&se->sf2_prev_state, uap->sf2_prev_state, sizeof(struct state));
+	copyout(&se->sf1_state, uap->sf1_state, sizeof(struct state));
     copyout(&se->sf2_state, uap->sf2_state, sizeof(struct state));
+    copyout(&se->prev_action, uap->prev_action, sizeof(int));
 	
 	return (0);
 }
@@ -406,7 +410,7 @@ sys_mp_sched_dqn_select_subflow(struct thread *td, struct mp_sched_dqn_select_su
 	
 	/* Get response from DQN agent */
 	rw_wlock(&se->lock);
-	se->sf_select = uap->sf_select;
+	se->action = uap->action;
 	rw_wunlock(&se->lock);
 	
 	return (0);

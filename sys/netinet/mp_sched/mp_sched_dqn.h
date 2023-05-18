@@ -57,7 +57,8 @@ struct state_entry {
     uint32_t ref;
     
     /* Coordination with DQN handler */
-    int sf_select;
+    int action;
+    int prev_action;
     bool sent;
     struct rwlock lock;
     
@@ -83,6 +84,7 @@ struct dqn {
 	/* Previous state metrics for subflows */
 	struct state sf1_prev_state;
 	struct state sf2_prev_state;
+	int prev_action;
 };
 
 /* Macro to obtain the DQN proc pointer */

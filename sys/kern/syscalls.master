@@ -3306,15 +3306,16 @@
 		int mp_sched_dqn_get_state(
 			_Out_ u_int *ref,
 			_Out_ struct state *sf1_prev_state,
-			_Out_ struct state *sf1_state,
 			_Out_ struct state *sf2_prev_state,
-            _Out_ struct state *sf2_state
+			_Out_ struct state *sf1_state,
+            _Out_ struct state *sf2_state,
+            _Out_ int *prev_action
 		);
 	}
 588	AUE_NULL	STD {
 		int mp_sched_dqn_select_subflow(
 			u_int ref,
-			int sf_select
+			int action
 		);
 	}
 

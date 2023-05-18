@@ -1872,13 +1872,14 @@ struct mp_sched_dqn_clear_proc_args {
 struct mp_sched_dqn_get_state_args {
 	char ref_l_[PADL_(u_int *)]; u_int * ref; char ref_r_[PADR_(u_int *)];
 	char sf1_prev_state_l_[PADL_(struct state *)]; struct state * sf1_prev_state; char sf1_prev_state_r_[PADR_(struct state *)];
-	char sf1_state_l_[PADL_(struct state *)]; struct state * sf1_state; char sf1_state_r_[PADR_(struct state *)];
 	char sf2_prev_state_l_[PADL_(struct state *)]; struct state * sf2_prev_state; char sf2_prev_state_r_[PADR_(struct state *)];
+	char sf1_state_l_[PADL_(struct state *)]; struct state * sf1_state; char sf1_state_r_[PADR_(struct state *)];
 	char sf2_state_l_[PADL_(struct state *)]; struct state * sf2_state; char sf2_state_r_[PADR_(struct state *)];
+	char prev_action_l_[PADL_(int *)]; int * prev_action; char prev_action_r_[PADR_(int *)];
 };
 struct mp_sched_dqn_select_subflow_args {
 	char ref_l_[PADL_(u_int)]; u_int ref; char ref_r_[PADR_(u_int)];
-	char sf_select_l_[PADL_(int)]; int sf_select; char sf_select_r_[PADR_(int)];
+	char action_l_[PADL_(int)]; int action; char action_r_[PADR_(int)];
 };
 int	nosys(struct thread *, struct nosys_args *);
 void	sys_sys_exit(struct thread *, struct sys_exit_args *);

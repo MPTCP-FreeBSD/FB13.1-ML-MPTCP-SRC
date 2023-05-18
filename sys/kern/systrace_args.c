@@ -3444,17 +3444,18 @@ systrace_args(int sysnum, void *params, uint64_t *uarg, int *n_args)
 		struct mp_sched_dqn_get_state_args *p = params;
 		uarg[0] = (intptr_t)p->ref; /* u_int * */
 		uarg[1] = (intptr_t)p->sf1_prev_state; /* struct state * */
-		uarg[2] = (intptr_t)p->sf1_state; /* struct state * */
-		uarg[3] = (intptr_t)p->sf2_prev_state; /* struct state * */
+		uarg[2] = (intptr_t)p->sf2_prev_state; /* struct state * */
+		uarg[3] = (intptr_t)p->sf1_state; /* struct state * */
 		uarg[4] = (intptr_t)p->sf2_state; /* struct state * */
-		*n_args = 5;
+		uarg[5] = (intptr_t)p->prev_action; /* int * */
+		*n_args = 6;
 		break;
 	}
 	/* mp_sched_dqn_select_subflow */
 	case 588: {
 		struct mp_sched_dqn_select_subflow_args *p = params;
 		uarg[0] = p->ref; /* u_int */
-		iarg[1] = p->sf_select; /* int */
+		iarg[1] = p->action; /* int */
 		*n_args = 2;
 		break;
 	}
@@ -9215,6 +9216,9 @@ systrace_entry_setargdesc(int sysnum, int ndx, char *desc, size_t descsz)
 			break;
 		case 4:
 			p = "userland struct state *";
+			break;
+		case 5:
+			p = "userland int *";
 			break;
 		default:
 			break;

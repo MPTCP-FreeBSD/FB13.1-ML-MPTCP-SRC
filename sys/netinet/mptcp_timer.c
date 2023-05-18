@@ -160,8 +160,7 @@ mp_timer_rexmt(void * xmp)
 		printf("%s: rxtshift %d reset subflows\n", __func__, mp->mp_rxtshift);
 		mp->mp_rxtshift = MPT_MAXRXTSHIFT;
 		mp_reset_all_subflows(mp);
-		(void) mp_drop(mp, ETIMEDOUT);
-		KASSERT(mp != NULL, ("%s: MP is NULL\n", __func__));
+		mp = mp_drop(mp, ETIMEDOUT);
 		goto out;
 	}
 
@@ -178,7 +177,8 @@ mp_timer_rexmt(void * xmp)
 //    return;
 
 out:
-    MPP_UNLOCK(mpp);
+    if (mp != NULL)
+        MPP_UNLOCK(mpp);
 }
 
 

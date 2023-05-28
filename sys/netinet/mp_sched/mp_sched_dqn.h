@@ -60,15 +60,12 @@ struct state_entry {
     int action;
     int prev_action;
     bool sent;
-    struct rwlock lock;
     
     /* Subflow 1 metrics */
-    struct sf_handle *sf1_handle;
     struct state sf1_prev_state;
     struct state sf1_state;
     
     /* Subflow 2 metrics */
-    struct sf_handle *sf2_handle;
     struct state sf2_prev_state;
     struct state sf2_state;
     

@@ -158,6 +158,9 @@ dqn_get_subflow(struct mp_sched_var *mpschedv)
 	struct state_entry *se = NULL;
 	
 	struct sf_handle *sf = NULL;
+	struct sf_handle *sf1 = NULL;
+	struct sf_handle *sf2 = NULL;
+	
 	struct inpcb *inp = NULL;
 	struct tcpcb *tp = NULL;
 	
@@ -181,7 +184,6 @@ dqn_get_subflow(struct mp_sched_var *mpschedv)
 	se->ref = DQN_REF_NEXT();
 	se->action = -1;
 	se->prev_action = dqn_data->prev_action;
-	rw_init(&se->lock, "state_entry");
 	
 	/* Get first subflow, return NULL if no subflows in list */
 	sf = TAILQ_FIRST(&mp->sf_list);
@@ -210,7 +212,7 @@ dqn_get_subflow(struct mp_sched_var *mpschedv)
 	}
 	
 	/* Populate subflow 1 metrics */
-	se->sf1_handle = sf;
+	sf1 = sf;
 	se->sf1_state.awnd = V_tcp_do_rfc6675_pipe ? tcp_compute_pipe(tp) : tp->snd_max - tp->snd_una;
 	se->sf1_state.cwnd = (int)tp->snd_cwnd;
 	se->sf1_state.swnd = (int)tp->snd_wnd;
@@ -224,7 +226,7 @@ dqn_get_subflow(struct mp_sched_var *mpschedv)
 	/* Get second subflow, return subflow 1 if only 1 subflow in list */
 	sf = TAILQ_NEXT(sf, next_sf_handle);
 	if (sf == NULL) {
-		sf = se->sf1_handle;
+		sf = sf1;
 		goto out;
 	}
 	
@@ -249,7 +251,7 @@ dqn_get_subflow(struct mp_sched_var *mpschedv)
 	}
 	
 	/* Populate subflow 2 metrics */
-	se->sf2_handle = sf;
+	sf2 = sf;
     se->sf2_state.awnd = V_tcp_do_rfc6675_pipe ? tcp_compute_pipe(tp) : tp->snd_max - tp->snd_una;
     se->sf2_state.cwnd = (int)tp->snd_cwnd;
     se->sf2_state.swnd = (int)tp->snd_wnd;
@@ -265,9 +267,6 @@ dqn_get_subflow(struct mp_sched_var *mpschedv)
 	STAILQ_INSERT_TAIL(&state_queue, se, entries);
 	STATE_QUEUE_WUNLOCK();
 	
-	/* Signal DQN agent and wait for response */
-	kern_psignal(DQN_PROC(), SIGUSR1);
-	
 	attempts = 0;
 	response = FALSE;
 	while (attempts < DQN_MAX_ATTEMPTS && response == FALSE) {
@@ -278,14 +277,11 @@ dqn_get_subflow(struct mp_sched_var *mpschedv)
 	    /* Wait for response */
 	    startticks = ticks;
 	    while(ticks - startticks < DQN_TIMEOUT) {
-	        rw_rlock(&se->lock);
             if (se->action > -1) {
                 response = TRUE;
                 dqn_data->prev_action = se->action;
-                rw_runlock(&se->lock);
                 break;
             }
-	        rw_runlock(&se->lock);
 	    }
         
         if (response == FALSE) {
@@ -309,14 +305,15 @@ dqn_get_subflow(struct mp_sched_var *mpschedv)
 	/* Process response */
     switch (se->action) {
     case 0:
-        sf = se->sf1_handle;
+        sf = sf1;
         goto out;
         break;
     case 1:
-        sf = se->sf2_handle;
+        sf = sf2;
         goto out;
         break;
     default:
+        sf = NULL;
         goto fallback;
         break;
     }    
@@ -365,7 +362,15 @@ sys_mp_sched_dqn_get_state(struct thread *td, struct mp_sched_dqn_get_state_args
 	STATE_QUEUE_WLOCK();
 	STAILQ_FOREACH(se, &state_queue, entries) {
 		if (!se->sent) {
-            se->sent = TRUE;
+            /* Copy values from kernel to user */
+			copyout(&se->ref, uap->ref, sizeof(uint32_t));
+			copyout(&se->sf1_prev_state, uap->sf1_prev_state, sizeof(struct state));
+			copyout(&se->sf2_prev_state, uap->sf2_prev_state, sizeof(struct state));
+			copyout(&se->sf1_state, uap->sf1_state, sizeof(struct state));
+			copyout(&se->sf2_state, uap->sf2_state, sizeof(struct state));
+			copyout(&se->prev_action, uap->prev_action, sizeof(int));
+			
+			se->sent = TRUE;
 			break;
 		}
 	}
@@ -376,14 +381,6 @@ sys_mp_sched_dqn_get_state(struct thread *td, struct mp_sched_dqn_get_state_args
 		td->td_retval[0] = -1;
 		return (0);
 	}
-	
-	/* Copy values from kernel to user */
-	copyout(&se->ref, uap->ref, sizeof(uint32_t));
-	copyout(&se->sf1_prev_state, uap->sf1_prev_state, sizeof(struct state));
-	copyout(&se->sf2_prev_state, uap->sf2_prev_state, sizeof(struct state));
-	copyout(&se->sf1_state, uap->sf1_state, sizeof(struct state));
-    copyout(&se->sf2_state, uap->sf2_state, sizeof(struct state));
-    copyout(&se->prev_action, uap->prev_action, sizeof(int));
 	
 	return (0);
 }
@@ -397,6 +394,7 @@ sys_mp_sched_dqn_select_subflow(struct thread *td, struct mp_sched_dqn_select_su
 	STATE_QUEUE_WLOCK();
 	STAILQ_FOREACH(se, &state_queue, entries) {
 		if (se->ref == uap->ref) {
+			se->action = uap->action;
 			break;
 		}
 	}
@@ -407,12 +405,7 @@ sys_mp_sched_dqn_select_subflow(struct thread *td, struct mp_sched_dqn_select_su
 		td->td_retval[0] = -1;
 		return (0);
 	}
-	
-	/* Get response from DQN agent */
-	rw_wlock(&se->lock);
-	se->action = uap->action;
-	rw_wunlock(&se->lock);
-	
+
 	return (0);
 }
 

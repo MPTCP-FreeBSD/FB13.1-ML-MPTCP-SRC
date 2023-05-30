@@ -56,6 +56,7 @@ __FBSDID("$FreeBSD$");
 #include <netinet/tcp_var.h>
 #include <netinet/mptcp.h>
 #include <netinet/mptcp_var.h>
+#include <netinet/mptcp_pcb.h>
 #include <netinet/mp_sched/mp_sched.h>
 #include <netinet/mp_sched/mp_sched_module.h>
 #include <netinet/mp_sched/mp_sched_dqn.h>
@@ -163,9 +164,7 @@ dqn_get_subflow(struct mp_sched_var *mpschedv)
 	
 	struct inpcb *inp = NULL;
 	struct tcpcb *tp = NULL;
-	
-	uint32_t startticks = 0;
-	int attempts = 0;
+
 	bool response = FALSE;
 	
 	dqn_data = mpschedv->mp_sched_data;
@@ -176,7 +175,7 @@ dqn_get_subflow(struct mp_sched_var *mpschedv)
 		goto fallback;
 	
 	/* Allocate state memory, fallback to RoundRobin on failure */
-	se = malloc(sizeof(struct state), M_STATE, M_NOWAIT|M_ZERO);
+	se = malloc(sizeof(struct state_entry), M_STATE, M_NOWAIT|M_ZERO);
 	if (se == NULL)
 		goto fallback;
 	
@@ -184,6 +183,7 @@ dqn_get_subflow(struct mp_sched_var *mpschedv)
 	se->ref = DQN_REF_NEXT();
 	se->action = -1;
 	se->prev_action = dqn_data->prev_action;
+	sema_init(&se->se_sema, 0, "se_sema");
 	
 	/* Get first subflow, return NULL if no subflows in list */
 	sf = TAILQ_FIRST(&mp->sf_list);
@@ -267,35 +267,22 @@ dqn_get_subflow(struct mp_sched_var *mpschedv)
 	STAILQ_INSERT_TAIL(&state_queue, se, entries);
 	STATE_QUEUE_WUNLOCK();
 	
-	attempts = 0;
 	response = FALSE;
-	while (attempts < DQN_MAX_ATTEMPTS && response == FALSE) {
-	    /* Reset sent flag and signal DQN agent*/
- 	    se->sent = FALSE;
-	    kern_psignal(DQN_PROC(), SIGUSR1);
-	    
-	    /* Wait for response */
-	    startticks = ticks;
-	    while(ticks - startticks < DQN_TIMEOUT) {
-            if (se->action > -1) {
-                response = TRUE;
-                dqn_data->prev_action = se->action;
-                break;
-            }
-	    }
-        
-        if (response == FALSE) {
-            printf("%s: Timeout waiting for DQN agent response - %d/%d.\n", __func__, attempts + 1, DQN_MAX_ATTEMPTS);
-        }
-        
-	    attempts++;
-	}
+	kern_psignal(DQN_PROC(), SIGUSR1);
 	
-	if (response == FALSE) {
-        kern_psignal(DQN_PROC(), SIGKILL);
-        DQN_PROC() = NULL;
-        printf("%s: DQN agent unresponsive after %d attempts, killing and clearing process.\n", __func__, DQN_MAX_ATTEMPTS);
+	MPP_UNLOCK(mp->mp_mppcb);
+	if (sema_timedwait(&se->se_sema, DQN_TIMEOUT) == 0) {
+		response = TRUE;
+		dqn_data->prev_action = se->action;
 	}
+	else {
+		printf("%s: Timeout waiting for DQN agent response, ref = %d.\n", __func__, se->ref);
+		if (DQN_PROC() != NULL) {
+  			kern_psignal(DQN_PROC(), SIGKILL);
+  			DQN_PROC() = NULL;
+		}
+	}
+	MPP_LOCK(mp->mp_mppcb);
 	
 	/* Remove state entry from queue */
 	STATE_QUEUE_WLOCK();
@@ -327,8 +314,10 @@ fallback:
 	
 out:
 	/* Cleanup memory and return selection */
-	if (se != NULL)
+	if (se != NULL) {
+		sema_destroy(&se->se_sema);	 
 		free(se, M_STATE);
+	}
 		
 	return sf;
 }
@@ -361,7 +350,7 @@ sys_mp_sched_dqn_get_state(struct thread *td, struct mp_sched_dqn_get_state_args
 	/* Find next state entry to be sent */
 	STATE_QUEUE_WLOCK();
 	STAILQ_FOREACH(se, &state_queue, entries) {
-		if (!se->sent) {
+		if (se->sent == FALSE) {
             /* Copy values from kernel to user */
 			copyout(&se->ref, uap->ref, sizeof(uint32_t));
 			copyout(&se->sf1_prev_state, uap->sf1_prev_state, sizeof(struct state));
@@ -395,6 +384,7 @@ sys_mp_sched_dqn_select_subflow(struct thread *td, struct mp_sched_dqn_select_su
 	STAILQ_FOREACH(se, &state_queue, entries) {
 		if (se->ref == uap->ref) {
 			se->action = uap->action;
+			sema_post(&se->se_sema);
 			break;
 		}
 	}
@@ -402,6 +392,7 @@ sys_mp_sched_dqn_select_subflow(struct thread *td, struct mp_sched_dqn_select_su
 	
 	/* No matching state entry found */
 	if (se == NULL) {
+		printf("%s: no state entry found for ref = %d", __func__, uap->ref);
 		td->td_retval[0] = -1;
 		return (0);
 	}

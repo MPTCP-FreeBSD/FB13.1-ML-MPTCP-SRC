@@ -29,8 +29,7 @@
 #ifndef _NETINET_MP_SCHED_DQN_H_
 #define _NETINET_MP_SCHED_DQN_H_
 
-#define DQN_TIMEOUT 50
-#define DQN_MAX_ATTEMPTS 5
+#define DQN_TIMEOUT 500
 
 /* Global vars */
 extern STAILQ_HEAD(state_head, state_entry) state_queue;
@@ -60,6 +59,7 @@ struct state_entry {
     int action;
     int prev_action;
     bool sent;
+    struct sema se_sema;
     
     /* Subflow 1 metrics */
     struct state sf1_prev_state;

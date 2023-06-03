@@ -68,13 +68,16 @@ VNET_DEFINE(struct proc *, mp_sched_dqn_proc_ptr) = NULL;
 VNET_DEFINE(uint32_t, mp_sched_dqn_ref_ctr) = 0;
 
 static MALLOC_DEFINE(M_DQN, "DQN scheduler data", "Per connection DQN scheduler data.");
-static MALLOC_DEFINE(M_STATE, "DQN State data", "State data for transfer to DQN agent.");
+static MALLOC_DEFINE(M_STATE_ENTRY, "DQN State data", "State data for transfer to DQN agent.");
 
 static int	dqn_mod_init(void);
 static int	dqn_mod_destroy(void);
 static int	dqn_cb_init(struct mp_sched_var *mpschedv);
 static void	dqn_cb_destroy(struct mp_sched_var *mpschedv);
 static struct sf_handle * dqn_get_subflow(struct mp_sched_var *mpschedv);
+
+static struct sf_handle * validate_subflow(struct sf_handle *sf, struct dqn * dqn_data, struct mpcb *mp);
+static int calculate_gput_wma(int32_t sf1_gput_hist[HIST_SIZE], int32_t sf2_gput_hist[HIST_SIZE]);
 
 struct mp_sched_algo dqn_mp_sched_algo = {
 	.name = "dqn",
@@ -102,7 +105,7 @@ static int dqn_mod_destroy(void)
 	STATE_QUEUE_WLOCK();
 	STAILQ_FOREACH(se, &state_queue, entries) {
 		STAILQ_REMOVE_HEAD(&state_queue, entries);
-		free(se, M_STATE);
+		free(se, M_STATE_ENTRY);
 	}
 	STATE_QUEUE_WUNLOCK();
 	
@@ -162,10 +165,8 @@ dqn_get_subflow(struct mp_sched_var *mpschedv)
 	struct sf_handle *sf1 = NULL;
 	struct sf_handle *sf2 = NULL;
 	
-	struct inpcb *inp = NULL;
-	struct tcpcb *tp = NULL;
-
-	bool response = FALSE;
+	struct inpcb *inp;
+	struct tcpcb *tp;
 	
 	dqn_data = mpschedv->mp_sched_data;
 	mp = mpschedv->mp;
@@ -175,105 +176,83 @@ dqn_get_subflow(struct mp_sched_var *mpschedv)
 		goto fallback;
 	
 	/* Allocate state memory, fallback to RoundRobin on failure */
-	se = malloc(sizeof(struct state_entry), M_STATE, M_NOWAIT|M_ZERO);
+	se = malloc(sizeof(struct state_entry), M_STATE_ENTRY, M_NOWAIT|M_ZERO);
 	if (se == NULL)
 		goto fallback;
 	
-	/* Init coordination values */
+	/* Init state entry values */
 	se->ref = DQN_REF_NEXT();
-	se->action = -1;
-	se->prev_action = dqn_data->prev_action;
 	sema_init(&se->se_sema, 0, "se_sema");
+	se->action = -1;
+	se->last_action = dqn_data->last_action;
 	
-	/* Get first subflow, return NULL if no subflows in list */
+	/* Shuffle goodput history by 1 element */
+	memmove(&dqn_data->sf1_gput_hist[1], &dqn_data->sf1_gput_hist[0], sizeof(int32_t)*(HIST_SIZE - 1));
+	memmove(&dqn_data->sf2_gput_hist[1], &dqn_data->sf2_gput_hist[0], sizeof(int32_t)*(HIST_SIZE - 1));
+	
+	/* Get subflow 1 from mpcb */
 	sf = TAILQ_FIRST(&mp->sf_list);
 	if (sf == NULL) {
 		goto out;
 	}
 	
+	/* Process subflow 1 */
+	sf1 = validate_subflow(sf, dqn_data, mp);
+	if (sf1 == NULL) {
+		goto out;
+	}
+	
 	inp = sotoinpcb(sf->sf_so);
 	tp = intotcpcb(inp);
-	INP_WLOCK(inp);
 	
-	/* Check subflow is available for transmission */
-	if (inp->inp_flags & (INP_DROPPED | INP_TIMEWAIT)) {
-		sf->sf_flags |= SFHS_MPENDED;
+	/* Populate subflow 1 state */
+    se->sf1_state.pipe = V_tcp_do_rfc6675_pipe ? tcp_compute_pipe(tp) : tp->snd_max - tp->snd_una;
+    se->sf1_state.wnd = tp->snd_cwnd < tp->snd_wnd ? (int)tp->snd_cwnd : tp->snd_wnd;
+    se->sf1_state.srtt = tp->t_srtt;
+    se->sf1_state.rttvar = tp->t_rttvar;
+    dqn_data->sf1_gput_hist[0] = tp->t_stats_gput_prev;
+	memcpy(&se->sf1_last_state, &dqn_data->sf1_last_state, sizeof(struct state));
+	memcpy(&dqn_data->sf1_last_state, &se->sf1_state, sizeof(struct state));
 	
-		if (tp->t_sf_state & SFS_MP_DISCONNECTED)
-			mp_schedule_tasks(mp, MP_SCHEDCLOSE);
-	
-		INP_WUNLOCK(inp);
-		goto fallback;
-	}
-	
-	if ((tp->t_state < TCPS_ESTABLISHED) || tp->t_rxtshift) {
-		INP_WUNLOCK(inp);
-		goto fallback;
-	}
-	
-	/* Populate subflow 1 metrics */
-	sf1 = sf;
-	se->sf1_state.awnd = V_tcp_do_rfc6675_pipe ? tcp_compute_pipe(tp) : tp->snd_max - tp->snd_una;
-	se->sf1_state.cwnd = (int)tp->snd_cwnd;
-	se->sf1_state.swnd = (int)tp->snd_wnd;
-	se->sf1_state.rtt = tp->t_srtt;
-	se->sf1_state.rtt = tp->t_srtt;
-	memcpy(&se->sf1_prev_state, &dqn_data->sf1_prev_state, sizeof(struct state));
-	memcpy(&dqn_data->sf1_prev_state, &se->sf1_state, sizeof(struct state));
-	
-	INP_WUNLOCK(inp);
-	
-	/* Get second subflow, return subflow 1 if only 1 subflow in list */
+	/* Get subflow 2 from mpcb */
 	sf = TAILQ_NEXT(sf, next_sf_handle);
 	if (sf == NULL) {
 		sf = sf1;
 		goto out;
 	}
 	
+	/* Process subflow 2 */
+	sf2 = validate_subflow(sf, dqn_data, mp);
+	if (sf2 == NULL) {
+		sf = sf1;
+		goto out;
+	}
+	
 	inp = sotoinpcb(sf->sf_so);
 	tp = intotcpcb(inp);
-	INP_WLOCK(inp);
 	
-	/* Check subflow is available for transmission */
-	if (inp->inp_flags & (INP_DROPPED | INP_TIMEWAIT)) {
-		sf->sf_flags |= SFHS_MPENDED;
+	/* Populate subflow 1 state */
+    se->sf2_state.pipe = V_tcp_do_rfc6675_pipe ? tcp_compute_pipe(tp) : tp->snd_max - tp->snd_una;
+    se->sf2_state.wnd = tp->snd_cwnd < tp->snd_wnd ? (int)tp->snd_cwnd : tp->snd_wnd;
+    se->sf2_state.srtt = tp->t_srtt;
+    se->sf2_state.rttvar = tp->t_rttvar;
+    dqn_data->sf2_gput_hist[0] = tp->t_stats_gput_prev;
+	memcpy(&se->sf2_last_state, &dqn_data->sf2_last_state, sizeof(struct state));
+	memcpy(&dqn_data->sf2_last_state, &se->sf2_state, sizeof(struct state));
 	
-		if (tp->t_sf_state & SFS_MP_DISCONNECTED)
-			mp_schedule_tasks(mp, MP_SCHEDCLOSE);
-	
-		INP_WUNLOCK(inp);
-		goto fallback;
-	}
-	
-	if ((tp->t_state < TCPS_ESTABLISHED) || tp->t_rxtshift) {
-		INP_WUNLOCK(inp);
-		goto fallback;
-	}
-	
-	/* Populate subflow 2 metrics */
-	sf2 = sf;
-    se->sf2_state.awnd = V_tcp_do_rfc6675_pipe ? tcp_compute_pipe(tp) : tp->snd_max - tp->snd_una;
-    se->sf2_state.cwnd = (int)tp->snd_cwnd;
-    se->sf2_state.swnd = (int)tp->snd_wnd;
-    se->sf2_state.rtt = tp->t_srtt;
-    se->sf2_state.rtt = tp->t_srtt;
-    memcpy(&se->sf2_prev_state, &dqn_data->sf2_prev_state, sizeof(struct state));
-    memcpy(&dqn_data->sf2_prev_state, &se->sf2_state, sizeof(struct state));
-	
-	INP_WUNLOCK(inp);
+	/* Calculate goodput weighted moving average */
+	se->total_gput_wma = calculate_gput_wma(dqn_data->sf1_gput_hist, dqn_data->sf2_gput_hist);
 	
 	/* Queue state entry for handling by DQN agent */
 	STATE_QUEUE_WLOCK();
 	STAILQ_INSERT_TAIL(&state_queue, se, entries);
 	STATE_QUEUE_WUNLOCK();
 	
-	response = FALSE;
 	kern_psignal(DQN_PROC(), SIGUSR1);
 	
 	MPP_UNLOCK(mp->mp_mppcb);
 	if (sema_timedwait(&se->se_sema, DQN_TIMEOUT) == 0) {
-		response = TRUE;
-		dqn_data->prev_action = se->action;
+		dqn_data->last_action = se->action;
 	}
 	else {
 		printf("%s: Timeout waiting for DQN agent response, ref = %d.\n", __func__, se->ref);
@@ -316,12 +295,59 @@ out:
 	/* Cleanup memory and return selection */
 	if (se != NULL) {
 		sema_destroy(&se->se_sema);	 
-		free(se, M_STATE);
+		free(se, M_STATE_ENTRY);
 	}
 		
 	return sf;
 }
 
+static struct sf_handle *
+validate_subflow(struct sf_handle *sf, struct dqn *dqn_data, struct mpcb *mp)
+{
+	struct inpcb *inp;
+	struct tcpcb *tp;
+	
+	inp = sotoinpcb(sf->sf_so);
+	tp = intotcpcb(inp);
+	
+	INP_WLOCK(inp);
+	
+	/* Check subflow is available for transmission */
+	if (inp->inp_flags & (INP_DROPPED | INP_TIMEWAIT)) {
+		sf->sf_flags |= SFHS_MPENDED;
+	
+		if (tp->t_sf_state & SFS_MP_DISCONNECTED)
+			mp_schedule_tasks(mp, MP_SCHEDCLOSE);
+	
+		INP_WUNLOCK(inp);
+		return NULL;
+	}
+	
+	if ((tp->t_state < TCPS_ESTABLISHED) || tp->t_rxtshift) {
+		INP_WUNLOCK(inp);
+		return NULL;
+	}
+
+	INP_WUNLOCK(inp);
+	
+	return sf;
+}
+
+static int
+calculate_gput_wma(int32_t sf1_gput_hist[HIST_SIZE], int32_t sf2_gput_hist[HIST_SIZE])
+{
+	int count = 0;
+	int sf1_total = 0;
+	int sf2_total = 0;
+	
+	for (int i = 0; i < HIST_SIZE; i++) {
+		count += HIST_SIZE - i;
+		sf1_total += sf1_gput_hist[i] * (HIST_SIZE - i);
+		sf2_total += sf2_gput_hist[i] * (HIST_SIZE - i);
+	}
+	
+	return ((sf1_total + sf2_total) / count);
+}
 
 int
 sys_mp_sched_dqn_set_proc(struct thread *td, struct mp_sched_dqn_set_proc_args *uap)
@@ -351,15 +377,18 @@ sys_mp_sched_dqn_get_state(struct thread *td, struct mp_sched_dqn_get_state_args
 	STATE_QUEUE_WLOCK();
 	STAILQ_FOREACH(se, &state_queue, entries) {
 		if (se->sent == FALSE) {
-            /* Copy values from kernel to user */
+            /* Set sent flag */
+            se->sent = TRUE;
+            
+            /* Copy values from kernel to userland */
 			copyout(&se->ref, uap->ref, sizeof(uint32_t));
-			copyout(&se->sf1_prev_state, uap->sf1_prev_state, sizeof(struct state));
-			copyout(&se->sf2_prev_state, uap->sf2_prev_state, sizeof(struct state));
+			copyout(&se->last_action, uap->last_action, sizeof(int));
+			copyout(&se->sf1_last_state, uap->sf1_last_state, sizeof(struct state));
+			copyout(&se->sf2_last_state, uap->sf2_last_state, sizeof(struct state));
 			copyout(&se->sf1_state, uap->sf1_state, sizeof(struct state));
 			copyout(&se->sf2_state, uap->sf2_state, sizeof(struct state));
-			copyout(&se->prev_action, uap->prev_action, sizeof(int));
+			copyout(&se->total_gput_wma, uap->total_gput_wma, sizeof(int));
 			
-			se->sent = TRUE;
 			break;
 		}
 	}

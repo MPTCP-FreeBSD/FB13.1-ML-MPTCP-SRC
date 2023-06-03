@@ -3305,11 +3305,12 @@
 587	AUE_NULL	STD {
 		int mp_sched_dqn_get_state(
 			_Out_ u_int *ref,
-			_Out_ struct state *sf1_prev_state,
-			_Out_ struct state *sf2_prev_state,
+			_Out_ int *last_action,
+			_Out_ struct state *sf1_last_state,
+			_Out_ struct state *sf2_last_state,
 			_Out_ struct state *sf1_state,
-            _Out_ struct state *sf2_state,
-            _Out_ int *prev_action
+			_Out_ struct state *sf2_state,
+			_Out_ int *total_gput_wma
 		);
 	}
 588	AUE_NULL	STD {

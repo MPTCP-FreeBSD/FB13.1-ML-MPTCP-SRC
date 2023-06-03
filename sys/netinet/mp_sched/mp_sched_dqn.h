@@ -30,6 +30,7 @@
 #define _NETINET_MP_SCHED_DQN_H_
 
 #define DQN_TIMEOUT 500
+#define HIST_SIZE 3
 
 /* Global vars */
 extern STAILQ_HEAD(state_head, state_entry) state_queue;
@@ -43,45 +44,37 @@ VNET_DECLARE(uint32_t, mp_sched_dqn_ref_ctr);
 
 /* Structure for DQN state information */
 struct state {
-    int awnd;
-    int cwnd;
-    int swnd;
-    int rtt;
-    int rttvar;
+    int pipe;      /* Unacknowledged bytes in flight */
+    uint32_t wnd;  /* Window size - min of cwnd and swnd */
+    int srtt;      /* Smoothed round trip time */
+    int rttvar;    /* Variance in round trip time */
 };
 
 /* State entry structure for queuing and DQN agent coordination */
 struct state_entry {
-    /* Reference number for lookup */
-    uint32_t ref;
-    
-    /* Coordination with DQN handler */
-    int action;
-    int prev_action;
-    bool sent;
-    struct sema se_sema;
-    
-    /* Subflow 1 metrics */
-    struct state sf1_prev_state;
-    struct state sf1_state;
-    
-    /* Subflow 2 metrics */
-    struct state sf2_prev_state;
-    struct state sf2_state;
+    uint32_t ref;         /* Reference number for lookup */
+    bool sent;            /* Flag for sent to DQN agent */
+    struct sema se_sema;  /* Semaphore for response signaling */
+    int action;          /* Action selected by agent */
+    int last_action;     /* Last action taken by agent */
+    struct state sf1_last_state;  /* Subflow 1 last state */
+	struct state sf2_last_state;  /* Subflow 2 last state */
+	struct state sf1_state;       /* Subflow 1 current state */
+    struct state sf2_state;	      /* Subflow 2 current state */
+    int total_gput_wma;           /* Sum of subflow 1 and subflow 2 goodput weighted moving average */
     
     STAILQ_ENTRY(state_entry) entries;
 };
 
 /* Algorithm-specific data */
 struct dqn {
-	/* Structures for fallback algorithm */
-	struct mp_sched_algo *fb_algo;
-	struct mp_sched_var fb_mpschedv;
-
-	/* Previous state metrics for subflows */
-	struct state sf1_prev_state;
-	struct state sf2_prev_state;
-	int prev_action;
+	struct mp_sched_algo *fb_algo;    /* Pointer to fallback algorithm */
+	struct mp_sched_var fb_mpschedv;  /* Data for fallback algorithm */
+    int last_action;                 /* Last action taken by agent */
+    struct state sf1_last_state;      /* Subflow 1 last state */
+	struct state sf2_last_state;      /* Subflow 2 last state */
+	int32_t sf1_gput_hist[HIST_SIZE];  /* Subflow 1 historical goodput data */
+	int32_t sf2_gput_hist[HIST_SIZE];  /* Subflow 1 historical goodput data */
 };
 
 /* Macro to obtain the DQN proc pointer */

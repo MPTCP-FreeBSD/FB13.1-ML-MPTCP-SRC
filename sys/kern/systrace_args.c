@@ -3443,12 +3443,13 @@ systrace_args(int sysnum, void *params, uint64_t *uarg, int *n_args)
 	case 587: {
 		struct mp_sched_dqn_get_state_args *p = params;
 		uarg[0] = (intptr_t)p->ref; /* u_int * */
-		uarg[1] = (intptr_t)p->sf1_prev_state; /* struct state * */
-		uarg[2] = (intptr_t)p->sf2_prev_state; /* struct state * */
-		uarg[3] = (intptr_t)p->sf1_state; /* struct state * */
-		uarg[4] = (intptr_t)p->sf2_state; /* struct state * */
-		uarg[5] = (intptr_t)p->prev_action; /* int * */
-		*n_args = 6;
+		uarg[1] = (intptr_t)p->last_action; /* int * */
+		uarg[2] = (intptr_t)p->sf1_last_state; /* struct state * */
+		uarg[3] = (intptr_t)p->sf2_last_state; /* struct state * */
+		uarg[4] = (intptr_t)p->sf1_state; /* struct state * */
+		uarg[5] = (intptr_t)p->sf2_state; /* struct state * */
+		uarg[6] = (intptr_t)p->total_gput_wma; /* int * */
+		*n_args = 7;
 		break;
 	}
 	/* mp_sched_dqn_select_subflow */
@@ -9206,7 +9207,7 @@ systrace_entry_setargdesc(int sysnum, int ndx, char *desc, size_t descsz)
 			p = "userland u_int *";
 			break;
 		case 1:
-			p = "userland struct state *";
+			p = "userland int *";
 			break;
 		case 2:
 			p = "userland struct state *";
@@ -9218,6 +9219,9 @@ systrace_entry_setargdesc(int sysnum, int ndx, char *desc, size_t descsz)
 			p = "userland struct state *";
 			break;
 		case 5:
+			p = "userland struct state *";
+			break;
+		case 6:
 			p = "userland int *";
 			break;
 		default:

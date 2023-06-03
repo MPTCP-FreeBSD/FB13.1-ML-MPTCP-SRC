@@ -2952,18 +2952,15 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 				close:
 					/* FALLTHROUGH */
 				default:
-					printf("%s: close after RST\n", __func__);
-					tp = tcp_close(tp);
-
 					/* XXXNJW: This will ensure that a close is
 					 * called on the subflow socket, as the wakeups
 					 * (in tcp_drop) won't actually cause a close in this
 					 * case. */
-					if (tp != NULL) {
-						if (tp->t_sf_state & SFS_MP_ENABLED) {
-							mp_wakeup |= MP_SCHEDCLOSE;
-						}
-					}
+					if (tp->t_sf_state & SFS_MP_ENABLED)
+						mp_wakeup |= MP_SCHEDCLOSE;
+					
+					printf("%s: close after RST\n", __func__);
+					tp = tcp_close(tp);
 				}
 			} else {
 				printf("%s: send RST challenge\n", __func__);

@@ -2959,8 +2959,11 @@ tcp_do_segment(struct mbuf *m, struct tcphdr *th, struct socket *so,
 					 * called on the subflow socket, as the wakeups
 					 * (in tcp_drop) won't actually cause a close in this
 					 * case. */
-					if (tp->t_sf_state & SFS_MP_ENABLED)
-                        mp_wakeup |= MP_SCHEDCLOSE;
+					if (tp != NULL) {
+						if (tp->t_sf_state & SFS_MP_ENABLED) {
+							mp_wakeup |= MP_SCHEDCLOSE;
+						}
+					}
 				}
 			} else {
 				printf("%s: send RST challenge\n", __func__);

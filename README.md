@@ -1,27 +1,6 @@
-FreeBSD Source:
+MPTCP FreeBSD Source:
 ---------------
-This is the top level of the FreeBSD source directory.  This file
-was last revised on:
-$FreeBSD$
-
-FreeBSD is an operating system used to power modern servers,
-desktops, and embedded platforms. A large community has
-continually developed it for more than thirty years. Its
-advanced networking, security, and storage features have
-made FreeBSD the platform of choice for many of the
-busiest web sites and most pervasive embedded networking
-and storage devices.
-
-For copyright information, please see the file COPYRIGHT in this
-directory. Additional copyright information also exists for some
-sources in this tree - please see the specific source directories for
-more information.
-
-The Makefile in this directory supports a number of targets for
-building components (or all) of the FreeBSD source tree.  See build(7), config(8),
-https://www.freebsd.org/doc/en_US.ISO8859-1/books/handbook/makeworld.html, and
-https://www.freebsd.org/doc/en_US.ISO8859-1/books/handbook/kernelconfig.html
-for more information, including setting make(1) variables.
+Multipath TCP (MPTCP) has been implemented and evaluated using the modular approach known as ModCC in FreeBSD. This research builds a foundation for developing an experimental platform and implementing MPTCP protocol stacks in FreeBSD-13 to plug machine learning (ML) models. Several independent and interoperable implementations are essential for the Internet Engineering Task Force (IETF) recognition of emerging ML-based MPTCP algorithms. We implement MPTCP under FreeBSD-13 and make them publicly available as dynamically pluggable user and kernel modules for testing and experimentation by the wider network and the Internet community. In particular, we redesign MPTCP over FreeBSD and implement enhanced ModCC in v13.1. In addition, we develop and implement a new kernel module CC-DRL to handle two system calls: i) drl_get_buffer to marshal data from the kernel to ML models in the user space and ii) drl_update_cwnd to marshal data from the ML models to the kernel space. CC-DRL operates in parallel with ModCC. We present new insights and concise descriptions of MPTCP implementation challenges to assist other parallel initiatives to develop compatible MPTCP stacks.
 
 Source Roadmap:
 ---------------
